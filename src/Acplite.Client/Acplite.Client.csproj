@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>acplite</ToolCommandName>
+    <PackageId>Acplite</PackageId>
+    <PackageTags>acp;acplite;agent-client-protocol;claude;codex;grok;antigravity;cli;dotnet-tool;</PackageTags>
+    <Description>CLI and stdio ACP bridge server for Claude Code, OpenAI Codex, Grok, and Google Antigravity.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="True" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Spectre.Console" Version="0.49.1" />
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Acplite.Sdk\Acplite.Sdk.csproj" />
+    <InternalsVisibleTo Include="Acplite.Tests" />
+  </ItemGroup>
+
+</Project>

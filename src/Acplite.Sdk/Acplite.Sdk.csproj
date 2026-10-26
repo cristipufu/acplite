@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <PackageId>Acplite.Sdk</PackageId>
+    <PackageTags>acp;acplite;agent-client-protocol;claude;codex;grok;antigravity;ai-agents;json-rpc;nativeaot;</PackageTags>
+    <Description>Native C# / NativeAOT Agent Client Protocol (ACP) SDK and provider bridges for Claude Code, OpenAI Codex, Grok, and Google Antigravity.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IsPackable>true</IsPackable>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="True" PackagePath="\" />
+    <InternalsVisibleTo Include="Acplite.Client" />
+    <InternalsVisibleTo Include="Acplite.Tests" />
+  </ItemGroup>
+
+</Project>

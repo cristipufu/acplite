@@ -1,0 +1,220 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # NativeAOT cannot cross-compile, so every RID needs a runner of its own.
+          - { os: ubuntu-latest,    rid: linux-x64 }
+          - { os: ubuntu-24.04-arm, rid: linux-arm64 }
+          - { os: macos-15-intel,   rid: osx-x64 }
+          - { os: macos-latest,     rid: osx-arm64 }
+          - { os: windows-latest,   rid: win-x64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      - name: Version from tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            version="${{ github.ref_name }}"
+            version="${version#v}"
+          else
+            version="0.1.0-ci.${{ github.run_number }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version"
+
+      - name: Publish
+        shell: bash
+        run: >
+          dotnet publish src/Acplite.Client
+          -c Release
+          -r ${{ matrix.rid }}
+          -p:PublishAot=true
+          -p:InvariantGlobalization=true
+          -p:Version=${{ steps.version.outputs.version }}
+          -o publish
+
+      - name: Stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="staging/acplite-${{ matrix.rid }}"
+          mkdir -p "$staging" dist
+          if [ -f publish/Acplite.Client.exe ]; then
+            cp publish/Acplite.Client.exe "$staging/acplite.exe"
+          else
+            cp publish/Acplite.Client "$staging/acplite"
+            chmod +x "$staging/acplite"
+          fi
+          cp LICENSE README.md "$staging/"
+
+      - name: Archive (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -czf "dist/acplite-${{ matrix.rid }}.tar.gz" -C staging "acplite-${{ matrix.rid }}"
+
+      - name: Archive (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "staging/acplite-${{ matrix.rid }}" -DestinationPath "dist/acplite-${{ matrix.rid }}.zip"
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="staging/acplite-${{ matrix.rid }}"
+          if [ -f "$staging/acplite.exe" ]; then
+            "$staging/acplite.exe" --help
+          else
+            "$staging/acplite" --help
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acplite-${{ matrix.rid }}
+          path: dist/*
+          if-no-files-found: error
+
+  nuget:
+    name: NuGet packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Trusted publishing: the GitHub OIDC token is exchanged for a short-lived NuGet API key,
+      # so no long-lived key is stored in the repository.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      - name: Version from tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            version="${{ github.ref_name }}"
+            version="${version#v}"
+          else
+            version="0.1.0-ci.${{ github.run_number }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Packing version $version"
+
+      - name: Test
+        run: dotnet test test/Acplite.Tests -c Release
+
+      - name: Pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          for project in src/Acplite.Sdk src/Acplite.Client; do
+            dotnet pack "$project" -c Release -p:Version=${{ steps.version.outputs.version }} -o packages
+          done
+          ls -la packages
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: packages/*
+          if-no-files-found: error
+
+      - name: Check what is already on nuget.org
+        if: startsWith(github.ref, 'refs/tags/')
+        id: nuget-check
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          pending=()
+          for id in Acplite Acplite.Sdk; do
+            lower=$(tr '[:upper:]' '[:lower:]' <<<"$id")
+            if curl -sS "https://api.nuget.org/v3-flatcontainer/$lower/index.json" | grep -qF "\"$version\""; then
+              echo "$id $version is already on nuget.org, skipping"
+            else
+              pending+=("packages/$id.$version.nupkg")
+            fi
+          done
+          echo "pending=${pending[*]:-}" >> "$GITHUB_OUTPUT"
+          echo "To push: ${pending[*]:-nothing}"
+
+      - name: Log in to NuGet
+        if: startsWith(github.ref, 'refs/tags/') && steps.nuget-check.outputs.pending != ''
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: cristipufu
+
+      - name: Push to NuGet
+        if: startsWith(github.ref, 'refs/tags/') && steps.nuget-check.outputs.pending != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in ${{ steps.nuget-check.outputs.pending }}; do
+            dotnet nuget push "$package" \
+              --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} \
+              --source https://api.nuget.org/v3/index.json \
+              --skip-duplicate
+          done
+
+  release:
+    needs: [build, nuget]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum acplite-* *.nupkg > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$tag" dist/* \
+              --repo "${{ github.repository }}" \
+              --title "$tag" \
+              --generate-notes
+          fi

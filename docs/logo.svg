@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="180" y2="180" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3B82F6" />
+      <stop offset="55%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#06B6D4" />
+    </linearGradient>
+  </defs>
+
+  <rect width="180" height="180" rx="36" fill="url(#bg)" />
+
+  <g transform="translate(92, 92) skewX(-11)">
+    <path
+      fill="#FFFFFF"
+      fill-rule="evenodd"
+      stroke="#FFFFFF"
+      stroke-width="6"
+      stroke-linejoin="round"
+      d="M -13 -46 L 13 -46 L 42 46 L 19 46 L 12 22 L -12 22 L -19 46 L -42 46 Z
+         M 0 -22 L -8 5 L 8 5 Z" />
+  </g>
+</svg>
