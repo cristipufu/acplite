@@ -13,11 +13,18 @@ public static class TranscriptTailer
 {
     public const int ChunkSize = 8192;
 
+    /// <summary>
+    /// Default tail window (16 MB) when reading existing history from large multi-day <c>.jsonl</c> transcripts.
+    /// Pass <see langword="null"/> to read from byte 0 regardless of file size.
+    /// </summary>
+    public const long DefaultMaxInitialBytes = 16 * 1024 * 1024;
+
     public static async IAsyncEnumerable<string> TailLinesAsync(
         string filePath,
         bool includeExistingLines = true,
         bool followLiveChanges = true,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        long? maxInitialBytes = DefaultMaxInitialBytes)
     {
         if (!File.Exists(filePath))
         {
@@ -25,6 +32,8 @@ public static class TranscriptTailer
         }
 
         long offset = 0;
+        var remainder = new StringBuilder();
+
         if (!includeExistingLines)
         {
             try
@@ -36,12 +45,17 @@ public static class TranscriptTailer
                 yield break;
             }
         }
-
-        var remainder = new StringBuilder();
-
-        foreach (var line in await ReadAvailableLinesAsync(filePath, remainder, () => offset, newOffset => offset = newOffset, cancellationToken).ConfigureAwait(false))
+        else
         {
-            yield return line;
+            await foreach (var line in StreamInitialLinesAsync(
+                filePath,
+                remainder,
+                maxInitialBytes,
+                newOffset => offset = newOffset,
+                cancellationToken).ConfigureAwait(false))
+            {
+                yield return line;
+            }
         }
 
         if (!followLiveChanges)
@@ -124,6 +138,125 @@ public static class TranscriptTailer
         {
             watcher.Changed -= SignalWake;
             watcher.Created -= SignalWake;
+        }
+    }
+
+    private static async IAsyncEnumerable<string> StreamInitialLinesAsync(
+        string filePath,
+        StringBuilder remainder,
+        long? maxInitialBytes,
+        Action<long> setOffset,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(ChunkSize);
+        var decoder = Encoding.UTF8.GetDecoder();
+        var charBuffer = ArrayPool<char>.Shared.Rent(ChunkSize);
+        var chunkLines = new List<string>(16);
+
+        FileStream? stream = null;
+        var offset = 0L;
+        var skipUntilNewline = false;
+
+        try
+        {
+            try
+            {
+                stream = new FileStream(
+                    filePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: ChunkSize,
+                    useAsync: true);
+
+                var length = stream.Length;
+                if (maxInitialBytes is > 0 && length > maxInitialBytes.Value)
+                {
+                    offset = length - maxInitialBytes.Value;
+                    stream.Seek(offset, SeekOrigin.Begin);
+                    skipUntilNewline = true;
+                }
+            }
+            catch (IOException)
+            {
+                yield break;
+            }
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                int bytesRead;
+                try
+                {
+                    bytesRead = await stream.ReadAsync(buffer.AsMemory(0, ChunkSize), cancellationToken).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    break;
+                }
+
+                if (bytesRead <= 0)
+                {
+                    break;
+                }
+
+                offset += bytesRead;
+                var decodeStart = 0;
+
+                if (skipUntilNewline)
+                {
+                    var nlIdx = buffer.AsSpan(0, bytesRead).IndexOf((byte)'\n');
+                    if (nlIdx < 0)
+                    {
+                        continue;
+                    }
+
+                    skipUntilNewline = false;
+                    decodeStart = nlIdx + 1;
+                    if (decodeStart >= bytesRead)
+                    {
+                        continue;
+                    }
+                }
+
+                var charsDecoded = decoder.GetChars(buffer, decodeStart, bytesRead - decodeStart, charBuffer, 0, flush: false);
+                for (var i = 0; i < charsDecoded; i++)
+                {
+                    var ch = charBuffer[i];
+                    if (ch == '\n')
+                    {
+                        var completed = remainder.ToString().TrimEnd('\r');
+                        remainder.Clear();
+                        if (!string.IsNullOrWhiteSpace(completed))
+                        {
+                            chunkLines.Add(completed);
+                        }
+                    }
+                    else
+                    {
+                        remainder.Append(ch);
+                    }
+                }
+
+                if (chunkLines.Count > 0)
+                {
+                    foreach (var line in chunkLines)
+                    {
+                        yield return line;
+                    }
+                    chunkLines.Clear();
+                }
+            }
+
+            setOffset(offset);
+        }
+        finally
+        {
+            if (stream is not null)
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
+            ArrayPool<char>.Shared.Return(charBuffer);
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 

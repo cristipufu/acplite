@@ -36,7 +36,7 @@ internal sealed class CodexSessionHandle : AcpSessionHandleBase
             w.WriteStartObject();
             w.WriteString("name", "acplite");
             w.WriteString("title", "Acplite.Sdk");
-            w.WriteString("version", "0.1.1");
+            w.WriteString("version", "0.1.2");
             w.WriteEndObject();
             w.WriteEndObject();
         });

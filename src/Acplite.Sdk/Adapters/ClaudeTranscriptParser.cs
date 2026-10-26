@@ -103,6 +103,13 @@ internal static class ClaudeTranscriptParser
             yield break;
         }
 
+        var prefix = line.AsSpan(0, Math.Min(line.Length, 256));
+        if (prefix.Contains("\"type\":\"file-history-snapshot\"", StringComparison.Ordinal) ||
+            prefix.Contains("\"type\":\"queue-operation\"", StringComparison.Ordinal))
+        {
+            yield break;
+        }
+
         JsonDocument? doc = null;
         try
         {
@@ -140,6 +147,39 @@ internal static class ClaudeTranscriptParser
                     Role: type,
                     Text: text ?? string.Empty,
                     Thinking: thinking);
+            }
+
+            if (type == "assistant" && msgObj.TryGetArray("content", out var contentArr))
+            {
+                foreach (var item in contentArr.EnumerateArray())
+                {
+                    if (item.GetOptionalString("type") == "tool_use")
+                    {
+                        var toolName = item.GetOptionalString("name");
+                        if (!string.IsNullOrWhiteSpace(toolName))
+                        {
+                            var toolId = item.GetStringOrDefault("id", Guid.NewGuid().ToString("N"));
+                            string? argSummary = null;
+                            string? rawInput = null;
+                            if (item.TryGetObject("input", out var inputObj))
+                            {
+                                argSummary = TextSanitizer.ExtractToolArgSummary(inputObj);
+                                rawInput = inputObj.GetRawText();
+                            }
+
+                            yield return new AcpToolCallEvent(
+                                Provider: AgentProviderKind.Claude,
+                                SessionId: sessionId,
+                                Timestamp: timestamp,
+                                ToolCallId: toolId,
+                                ToolName: toolName!,
+                                Title: !string.IsNullOrWhiteSpace(argSummary) ? argSummary! : toolName!,
+                                Kind: TextSanitizer.InferToolKind(toolName),
+                                Status: "completed",
+                                RawInputJson: rawInput);
+                        }
+                    }
+                }
             }
         }
     }

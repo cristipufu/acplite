@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Acplite.Sdk.Formatting;
 using Acplite.Sdk.Protocol;
 using Acplite.Sdk.Runtime;
 
@@ -144,6 +145,36 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
                     if (!string.IsNullOrEmpty(extracted))
                     {
                         PublishEvent(new AcpAssistantTextDeltaEvent(Provider, SessionId, now, extracted));
+                    }
+                }
+
+                if (root.TryGetArray("tool_calls", out var tcArr))
+                {
+                    foreach (var tc in tcArr.EnumerateArray())
+                    {
+                        var toolName = tc.GetOptionalString("name") ?? tc.GetOptionalString("tool_name");
+                        if (!string.IsNullOrWhiteSpace(toolName))
+                        {
+                            var toolId = tc.GetStringOrDefault("id", Guid.NewGuid().ToString("N"));
+                            string? argSummary = null;
+                            string? rawInput = null;
+                            if (tc.TryGetObject("args", out var argsObj))
+                            {
+                                argSummary = TextSanitizer.ExtractToolArgSummary(argsObj);
+                                rawInput = argsObj.GetRawText();
+                            }
+
+                            PublishEvent(new AcpToolCallEvent(
+                                Provider: Provider,
+                                SessionId: SessionId,
+                                Timestamp: now,
+                                ToolCallId: toolId,
+                                ToolName: toolName!,
+                                Title: !string.IsNullOrWhiteSpace(argSummary) ? argSummary! : toolName!,
+                                Kind: TextSanitizer.InferToolKind(toolName),
+                                Status: "completed",
+                                RawInputJson: rawInput));
+                        }
                     }
                 }
                 break;

@@ -129,29 +129,6 @@ internal static class AntigravityTranscriptParser
                 var content = root.GetStringOrDefault("content");
                 var thinking = root.GetOptionalString("thinking");
 
-                string? firstToolName = null;
-                if (root.TryGetArray("tool_calls", out var tcArr))
-                {
-                    foreach (var tc in tcArr.EnumerateArray())
-                    {
-                        var toolName = tc.GetOptionalString("name") ?? tc.GetOptionalString("tool_name");
-                        if (!string.IsNullOrWhiteSpace(toolName))
-                        {
-                            firstToolName ??= toolName;
-                            var toolId = tc.GetStringOrDefault("id", Guid.NewGuid().ToString("N"));
-                            yield return new AcpToolCallEvent(
-                                Provider: AgentProviderKind.Antigravity,
-                                SessionId: sessionId,
-                                Timestamp: timestamp,
-                                ToolCallId: toolId,
-                                ToolName: toolName!,
-                                Title: toolName!,
-                                Kind: TextSanitizer.InferToolKind(toolName),
-                                Status: "completed");
-                        }
-                    }
-                }
-
                 if (!string.IsNullOrWhiteSpace(content) || !string.IsNullOrWhiteSpace(thinking))
                 {
                     yield return new AcpTranscriptHistoryEntryEvent(
@@ -161,7 +138,37 @@ internal static class AntigravityTranscriptParser
                         Role: "assistant",
                         Text: content,
                         Thinking: thinking,
-                        ToolName: firstToolName);
+                        ToolName: null);
+                }
+
+                if (root.TryGetArray("tool_calls", out var tcArr))
+                {
+                    foreach (var tc in tcArr.EnumerateArray())
+                    {
+                        var toolName = tc.GetOptionalString("name") ?? tc.GetOptionalString("tool_name");
+                        if (!string.IsNullOrWhiteSpace(toolName))
+                        {
+                            var toolId = tc.GetStringOrDefault("id", Guid.NewGuid().ToString("N"));
+                            string? argSummary = null;
+                            string? rawInput = null;
+                            if (tc.TryGetObject("args", out var argsObj))
+                            {
+                                argSummary = TextSanitizer.ExtractToolArgSummary(argsObj);
+                                rawInput = argsObj.GetRawText();
+                            }
+
+                            yield return new AcpToolCallEvent(
+                                Provider: AgentProviderKind.Antigravity,
+                                SessionId: sessionId,
+                                Timestamp: timestamp,
+                                ToolCallId: toolId,
+                                ToolName: toolName!,
+                                Title: !string.IsNullOrWhiteSpace(argSummary) ? argSummary! : toolName!,
+                                Kind: TextSanitizer.InferToolKind(toolName),
+                                Status: "completed",
+                                RawInputJson: rawInput);
+                        }
+                    }
                 }
             }
         }

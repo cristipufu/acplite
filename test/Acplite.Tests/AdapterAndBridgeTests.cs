@@ -975,6 +975,94 @@ public sealed class AdapterAndBridgeTests
         Assert.False(handle.IsTurnActive);
     }
 
+    [Fact]
+    public async Task Codex_and_Antigravity_parsers_and_TranscriptTailer_handle_response_items_tool_summaries_and_tail_windows()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "acplite-tail-window-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var dayDir = Path.Combine(tempDir, "2026", "10", "26");
+            Directory.CreateDirectory(dayDir);
+            var rolloutPath = Path.Combine(dayDir, "rollout-2026-10-26T18-00-00-01a14b83-8e97-7d21-a424-fd6b4ecc0313.jsonl");
+
+            await File.WriteAllLinesAsync(rolloutPath,
+            [
+                "{\"timestamp\":\"2026-10-26T18:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"01a14b83-8e97-7d21-a424-fd6b4ecc0313\",\"cwd\":\"/Users/me/petrina\",\"git\":{\"branch\":\"main\"}}}",
+                "{\"timestamp\":\"2026-10-26T18:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /Users/me/petrina\"}]}}",
+                "{\"timestamp\":\"2026-10-26T18:00:01Z\",\"type\":\"world_state\",\"payload\":{\"full\":true}}",
+                "{\"timestamp\":\"2026-10-26T18:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"model\":\"gpt-6.1-sol\"}}}",
+                "{\"timestamp\":\"2026-10-26T18:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Revamp the acceptance test suite\"}]}}",
+                "{\"timestamp\":\"2026-10-26T18:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Revamp the acceptance test suite\"}}",
+                "{\"timestamp\":\"2026-10-26T18:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Inspecting test layers and runner fixtures...\"}]}}",
+                "{\"timestamp\":\"2026-10-26T18:00:05Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"call_1\",\"name\":\"exec\",\"input\":\"text(await tools.exec_command({cmd:\\\"dotnet test -c Release\\\"}))\"}}",
+                "{\"timestamp\":\"2026-10-26T18:00:06Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"agent_message\",\"id\":\"amsg_1\",\"author\":\"/root/test_layers_batch\",\"recipient\":\"/root\",\"content\":[{\"type\":\"input_text\",\"text\":\"Message Type: FINAL_ANSWER\\nTask name: /root\\nPayload:\\nPreserves all 24 variants.\"}]}}",
+                "{\"timestamp\":\"2026-10-26T18:00:07Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"The shared-product fixture batch passed all 71 tests.\"}]}}"
+            ]);
+
+            var codexAdapter = new CodexAdapter(tempDir);
+            var sessions = await codexAdapter.DiscoverSessionsAsync();
+            Assert.Single(sessions);
+            Assert.Equal("01a14b83-8e97-7d21-a424-fd6b4ecc0313", sessions[0].SessionId);
+            Assert.Equal("Revamp the acceptance test suite", sessions[0].Title);
+            Assert.Equal("/Users/me/petrina", sessions[0].WorkingDirectory);
+            Assert.Equal("gpt-6.1-sol", sessions[0].Model);
+
+            var events = new List<AcpEvent>();
+            await foreach (var ev in codexAdapter.TailSessionTranscriptAsync(sessions[0], includeHistory: true, followLive: false))
+            {
+                events.Add(ev);
+            }
+
+            // Injected AGENTS.md user message skipped; duplicate user_message deduplicated
+            Assert.Single(events.OfType<AcpTranscriptHistoryEntryEvent>(), e => e.Role == "user");
+            Assert.Contains(events, e => e is AcpTranscriptHistoryEntryEvent h && h.Thinking == "Inspecting test layers and runner fixtures...");
+            Assert.Contains(events, e => e is AcpToolCallEvent tc && tc.ToolName == "exec" && tc.Title == "dotnet test -c Release");
+            Assert.Contains(events, e => e is AcpToolCallEvent tc && tc.ToolName == "subagent" && tc.Title.Contains("test_layers_batch", StringComparison.Ordinal));
+            Assert.Contains(events, e => e is AcpTranscriptHistoryEntryEvent h && h.Role == "assistant" && h.Text == "The shared-product fixture batch passed all 71 tests.");
+
+            // Verify Antigravity tool call argument summary extraction without duplicate ToolName on history entry
+            var agyEvents = AntigravityTranscriptParser.ParseTranscriptLine(
+                "conv-1",
+                "{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"thinking\":\"Reading source...\",\"tool_calls\":[{\"id\":\"tc_9\",\"name\":\"read_file\",\"args\":{\"Path\":\"/Users/me/repo/src/Program.cs\",\"StartLine\":10,\"EndLine\":50}}]}").ToList();
+            Assert.Equal(2, agyEvents.Count);
+            var agyHist = Assert.IsType<AcpTranscriptHistoryEntryEvent>(agyEvents[0]);
+            Assert.Equal("Reading source...", agyHist.Thinking);
+            Assert.Null(agyHist.ToolName);
+            var agyTool = Assert.IsType<AcpToolCallEvent>(agyEvents[1]);
+            Assert.Equal("read_file", agyTool.ToolName);
+            Assert.Equal("src/Program.cs:10-50", agyTool.Title);
+
+            // Verify TranscriptTailer tail-window seeking skips old prefix and aligns to newline boundary
+            var largeFile = Path.Combine(tempDir, "large-tail.jsonl");
+            var sb = new StringBuilder();
+            for (var i = 0; i < 200; i++)
+            {
+                sb.AppendLine($"{{\"idx\":{i},\"pad\":\"{new string('x', 80)}\"}}");
+            }
+            await File.WriteAllTextAsync(largeFile, sb.ToString());
+
+            var tailedLines = new List<string>();
+            await foreach (var line in TranscriptTailer.TailLinesAsync(
+                largeFile,
+                includeExistingLines: true,
+                followLiveChanges: false,
+                maxInitialBytes: 1024))
+            {
+                tailedLines.Add(line);
+            }
+
+            Assert.NotEmpty(tailedLines);
+            Assert.True(tailedLines.Count < 20);
+            Assert.StartsWith("{\"idx\":", tailedLines[0], StringComparison.Ordinal);
+            Assert.Contains("\"idx\":199", tailedLines[^1], StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
     private sealed class FakeInMemoryProviderAdapter : IAcpProviderAdapter
     {
         public AgentProviderKind Provider => AgentProviderKind.Antigravity;

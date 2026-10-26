@@ -72,10 +72,25 @@ public abstract class ProviderAdapterBase : IAcpProviderAdapter
             yield break;
         }
 
+        AcpTranscriptHistoryEntryEvent? lastHistoryEvent = null;
+
         await foreach (var line in TranscriptTailer.TailLinesAsync(session.TranscriptPath, includeHistory, followLive, cancellationToken).ConfigureAwait(false))
         {
             foreach (var ev in ParseTranscriptLine(session.SessionId, line))
             {
+                if (ev is AcpTranscriptHistoryEntryEvent hist)
+                {
+                    if (lastHistoryEvent is not null &&
+                        string.Equals(lastHistoryEvent.Role, hist.Role, StringComparison.Ordinal) &&
+                        string.Equals(lastHistoryEvent.Text, hist.Text, StringComparison.Ordinal) &&
+                        string.Equals(lastHistoryEvent.Thinking, hist.Thinking, StringComparison.Ordinal) &&
+                        string.Equals(lastHistoryEvent.ToolName, hist.ToolName, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    lastHistoryEvent = hist;
+                }
+
                 yield return ev;
             }
         }
