@@ -49,13 +49,13 @@ internal static class ClaudeTranscriptParser
                     }
 
                     var type = root.GetOptionalString("type");
-                    if (type is "user" or "assistant")
+                    if (type is AcpRoles.User or AcpRoles.Assistant)
                     {
                         messageCount++;
                         if (root.TryGetObject("message", out var msgObj))
                         {
                             model ??= msgObj.GetOptionalString("model");
-                            if (title is null && type == "user")
+                            if (title is null && type == AcpRoles.User)
                             {
                                 title = ExtractMessageText(msgObj);
                             }
@@ -124,7 +124,7 @@ internal static class ClaudeTranscriptParser
         {
             var root = doc.RootElement;
             var type = root.GetOptionalString("type");
-            if (type is not ("user" or "assistant") || !root.TryGetObject("message", out var msgObj))
+            if (type is not (AcpRoles.User or AcpRoles.Assistant) || !root.TryGetObject("message", out var msgObj))
             {
                 yield break;
             }
@@ -149,7 +149,7 @@ internal static class ClaudeTranscriptParser
                     Thinking: thinking);
             }
 
-            if (type == "assistant" && msgObj.TryGetArray("content", out var contentArr))
+            if (type == AcpRoles.Assistant && msgObj.TryGetArray("content", out var contentArr))
             {
                 foreach (var item in contentArr.EnumerateArray())
                 {
@@ -175,7 +175,7 @@ internal static class ClaudeTranscriptParser
                                 ToolName: toolName!,
                                 Title: !string.IsNullOrWhiteSpace(argSummary) ? argSummary! : toolName!,
                                 Kind: TextSanitizer.InferToolKind(toolName),
-                                Status: "completed",
+                                Status: AcpToolStatuses.Completed,
                                 RawInputJson: rawInput);
                         }
                     }

@@ -139,7 +139,7 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
         catch
         {
             Volatile.Write(ref _isTurnActive, 0);
-            Volatile.Read(ref _activeTurnCompletionTcs)?.TrySetResult("error");
+            Volatile.Read(ref _activeTurnCompletionTcs)?.TrySetResult(AcpStopReasons.Error);
             throw;
         }
     }
@@ -194,7 +194,7 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
         catch
         {
             Volatile.Write(ref _isTurnActive, 0);
-            Volatile.Read(ref _activeTurnCompletionTcs)?.TrySetResult("error");
+            Volatile.Read(ref _activeTurnCompletionTcs)?.TrySetResult(AcpStopReasons.Error);
             throw;
         }
     }
@@ -345,22 +345,12 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
         {
             Volatile.Write(ref _isTurnActive, 0);
             PublishClassifiedError(ex.Message, "queue_drain_error");
-            PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, "error"));
+            PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, AcpStopReasons.Error));
         }
     }
 
     private static bool ShouldAutoDrainQueue(string? stopReason)
-    {
-        if (string.IsNullOrWhiteSpace(stopReason))
-        {
-            return true;
-        }
-
-        return !stopReason.Equals("error", StringComparison.OrdinalIgnoreCase) &&
-               !stopReason.Equals("cancelled", StringComparison.OrdinalIgnoreCase) &&
-               !stopReason.Equals("canceled", StringComparison.OrdinalIgnoreCase) &&
-               !stopReason.Equals("interrupted", StringComparison.OrdinalIgnoreCase);
-    }
+        => !AcpStopReasons.IsFailureOrCancellation(stopReason);
 
     public abstract Task<bool> SteerAsync(string steeringPrompt, CancellationToken cancellationToken = default);
     public abstract Task RespondPermissionAsync(
@@ -386,7 +376,7 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
         }
 
         PublishClassifiedError(exception.Message, "transport_error");
-        PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, "error"));
+        PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, AcpStopReasons.Error));
         OnSessionFaulted(exception);
     }
 
@@ -450,7 +440,7 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
                 var crashMessage = AppendStderrTail($"Agent process exited unexpectedly with code {exitCode}.");
                 var classification = ProviderInterruptionClassifier.Classify(crashMessage, "process_crashed");
                 PublishEvent(new AcpInterruptionEvent(Provider, SessionId, DateTimeOffset.UtcNow, classification));
-                PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, "error"));
+                PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, AcpStopReasons.Error));
                 OnSessionFaulted(new InvalidOperationException(crashMessage));
             }
             else

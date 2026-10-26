@@ -45,7 +45,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
             w.WriteEndObject();
         });
 
-        await Transport.SendRequestAsync("initialize", initParams, cancellationToken).ConfigureAwait(false);
+        await Transport.SendRequestAsync(AcpRpcMethods.Initialize, initParams, cancellationToken).ConfigureAwait(false);
 
         if (Config.ResumeExisting && !string.IsNullOrWhiteSpace(Config.SessionId))
         {
@@ -59,7 +59,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
                 w.WriteEndArray();
                 w.WriteEndObject();
             });
-            await Transport.SendRequestAsync("session/load", loadParams, cancellationToken).ConfigureAwait(false);
+            await Transport.SendRequestAsync(AcpRpcMethods.SessionLoad, loadParams, cancellationToken).ConfigureAwait(false);
             SessionId = Config.SessionId!;
         }
         else
@@ -73,7 +73,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
                 w.WriteEndArray();
                 w.WriteEndObject();
             });
-            var res = await Transport.SendRequestAsync("session/new", newParams, cancellationToken).ConfigureAwait(false);
+            var res = await Transport.SendRequestAsync(AcpRpcMethods.SessionNew, newParams, cancellationToken).ConfigureAwait(false);
             var assignedId = res.GetOptionalString("sessionId");
             if (!string.IsNullOrWhiteSpace(assignedId))
             {
@@ -118,8 +118,8 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
         {
             try
             {
-                var res = await Transport.SendRequestAsync("session/prompt", promptParams, linkedCts.Token).ConfigureAwait(false);
-                var stopReason = res.GetStringOrDefault("stopReason", "end_turn");
+                var res = await Transport.SendRequestAsync(AcpRpcMethods.SessionPrompt, promptParams, linkedCts.Token).ConfigureAwait(false);
+                var stopReason = res.GetStringOrDefault("stopReason", AcpStopReasons.EndTurn);
                 PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, stopReason));
             }
             catch (OperationCanceledException) when (LifetimeToken.IsCancellationRequested)
@@ -129,7 +129,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
             catch (Exception ex)
             {
                 PublishClassifiedError(ex.Message);
-                PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, "error"));
+                PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, AcpStopReasons.Error));
             }
         }
     }
@@ -141,7 +141,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
             return false;
         }
 
-        var method = _preferXaiExtensions ? "_x.ai/interject" : "_session/steering";
+        var method = _preferXaiExtensions ? AcpRpcMethods.XaiInterject : AcpRpcMethods.SessionSteering;
         try
         {
             var steerParams = JsonElementBuilder.Build(w =>
@@ -193,7 +193,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
             w.WriteString("modelId", modelId);
             w.WriteEndObject();
         });
-        await Transport.SendRequestAsync("session/set_model", modelParams, cancellationToken).ConfigureAwait(false);
+        await Transport.SendRequestAsync(AcpRpcMethods.SessionSetModel, modelParams, cancellationToken).ConfigureAwait(false);
     }
 
     public override async Task CancelTurnAsync(CancellationToken cancellationToken = default)
@@ -204,7 +204,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
             w.WriteString("sessionId", SessionId);
             w.WriteEndObject();
         });
-        await Transport.SendNotificationAsync("session/cancel", cancelParams, cancellationToken).ConfigureAwait(false);
+        await Transport.SendNotificationAsync(AcpRpcMethods.SessionCancel, cancelParams, cancellationToken).ConfigureAwait(false);
     }
 
     protected override void OnSessionFaulted(Exception exception)
@@ -236,7 +236,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
 
     private Task HandleNotificationAsync(string method, JsonElement? parameters, CancellationToken cancellationToken)
     {
-        if (method is not ("session/update" or "_x.ai/session/update") ||
+        if (method is not (AcpRpcMethods.SessionUpdate or AcpRpcMethods.XaiSessionUpdate) ||
             !parameters.HasValue ||
             !parameters.Value.TryGetObject("update", out var update))
         {
@@ -248,7 +248,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
 
         switch (updateKind)
         {
-            case "agent_message_chunk":
+            case AcpSessionUpdateKinds.AgentMessageChunk:
             {
                 if (update.TryGetObject("content", out var content))
                 {
@@ -261,7 +261,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
                 break;
             }
 
-            case "agent_thought_chunk":
+            case AcpSessionUpdateKinds.AgentThoughtChunk:
             {
                 if (update.TryGetObject("content", out var content))
                 {
@@ -274,13 +274,13 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
                 break;
             }
 
-            case "tool_call":
-            case "tool_call_update":
+            case AcpSessionUpdateKinds.ToolCall:
+            case AcpSessionUpdateKinds.ToolCallUpdate:
             {
                 var tcId = update.GetStringOrDefault("toolCallId", Guid.NewGuid().ToString("N"));
-                var title = update.GetStringOrDefault("title", "tool");
-                var kind = update.GetStringOrDefault("kind", "other");
-                var status = update.GetStringOrDefault("status", "in_progress");
+                var title = update.GetStringOrDefault("title", AcpRoles.Tool);
+                var kind = update.GetStringOrDefault("kind", AcpToolKinds.Other);
+                var status = update.GetStringOrDefault("status", AcpToolStatuses.InProgress);
                 PublishEvent(new AcpToolCallEvent(Provider, SessionId, now, tcId, title, title, kind, status));
                 break;
             }
@@ -295,7 +295,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
         JsonElement? parameters,
         CancellationToken cancellationToken)
     {
-        if (method != "session/request_permission")
+        if (method != AcpRpcMethods.SessionRequestPermission)
         {
             return JsonElementBuilder.EmptyObject;
         }
@@ -316,9 +316,9 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
             {
                 foreach (var opt in optsArr.EnumerateArray())
                 {
-                    var oid = opt.GetStringOrDefault("optionId", "allow");
+                    var oid = opt.GetStringOrDefault("optionId", AcpPermissionOptions.AllowId);
                     var oname = opt.GetStringOrDefault("name", oid);
-                    var okind = opt.GetStringOrDefault("kind", "allow_once");
+                    var okind = opt.GetStringOrDefault("kind", AcpPermissionOptions.AllowOnceKind);
                     options.Add(new AcpPermissionOption(oid, oname, okind));
                 }
             }
@@ -326,8 +326,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
 
         if (options.Count == 0)
         {
-            options.Add(new AcpPermissionOption("allow", "Allow", "allow_once"));
-            options.Add(new AcpPermissionOption("deny", "Deny", "reject_once"));
+            options.AddRange(AcpPermissionOptions.DefaultAllowDeny);
         }
 
         if (Config.AutoApproveTools)

@@ -220,7 +220,7 @@ internal sealed class ClaudeSessionHandle : AcpSessionHandleBase
                  cb.GetOptionalString("type") == "tool_use")
         {
             var toolId = cb.GetStringOrDefault("id", Guid.NewGuid().ToString("N"));
-            var toolName = cb.GetStringOrDefault("name", "tool");
+            var toolName = cb.GetStringOrDefault("name", AcpRoles.Tool);
             PublishEvent(new AcpToolCallEvent(
                 Provider: Provider,
                 SessionId: SessionId,
@@ -229,7 +229,7 @@ internal sealed class ClaudeSessionHandle : AcpSessionHandleBase
                 ToolName: toolName,
                 Title: toolName,
                 Kind: TextSanitizer.InferToolKind(toolName),
-                Status: "in_progress"));
+                Status: AcpToolStatuses.InProgress));
         }
     }
 
@@ -246,7 +246,7 @@ internal sealed class ClaudeSessionHandle : AcpSessionHandleBase
             return;
         }
 
-        var toolName = reqObj.GetStringOrDefault("tool_name", "tool");
+        var toolName = reqObj.GetStringOrDefault("tool_name", AcpRoles.Tool);
         _pendingPermissionRequests[reqId] = toolName;
 
         if (Config.AutoApproveTools)
@@ -268,17 +268,13 @@ internal sealed class ClaudeSessionHandle : AcpSessionHandleBase
             Title: $"Allow {toolName}?",
             Description: reqObj.GetOptionalString("description"),
             RawInputJson: rawInputJson,
-            Options:
-            [
-                new AcpPermissionOption("allow", "Allow", "allow_once"),
-                new AcpPermissionOption("deny", "Deny", "reject_once")
-            ]));
+            Options: AcpPermissionOptions.DefaultAllowDeny));
     }
 
     private void HandleResultFrame(JsonElement root, DateTimeOffset now)
     {
         var isError = root.GetBooleanOrDefault("is_error");
-        var subtype = root.GetStringOrDefault("subtype", "end_turn");
+        var subtype = root.GetStringOrDefault("subtype", AcpStopReasons.EndTurn);
         var durationMs = root.GetOptionalInt64("duration_ms");
         var costUsd = root.GetOptionalDecimal("total_cost_usd");
 
@@ -300,7 +296,7 @@ internal sealed class ClaudeSessionHandle : AcpSessionHandleBase
             Provider: Provider,
             SessionId: SessionId,
             Timestamp: now,
-            StopReason: isError ? "error" : "end_turn",
+            StopReason: isError ? AcpStopReasons.Error : AcpStopReasons.EndTurn,
             InputTokens: inputTokens,
             OutputTokens: outputTokens,
             CostUsd: costUsd,

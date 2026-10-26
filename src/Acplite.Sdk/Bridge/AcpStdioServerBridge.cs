@@ -54,210 +54,215 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
         _hostTransport.Start();
     }
 
-    private async Task<JsonElement?> HandleHostRequestAsync(
+    private Task<JsonElement?> HandleHostRequestAsync(
         JsonElement idElement,
         string method,
         JsonElement? parameters,
         CancellationToken cancellationToken)
     {
-        switch (method)
+        return method switch
         {
-            case "initialize":
+            AcpRpcMethods.Initialize => Task.FromResult<JsonElement?>(BuildInitializeResponse()),
+            AcpRpcMethods.SessionNew or AcpRpcMethods.SessionLoad
+                => HandleSessionCreateOrLoadAsync(method, parameters, cancellationToken),
+            AcpRpcMethods.SessionPrompt => HandleSessionPromptAsync(parameters, cancellationToken),
+            AcpRpcMethods.SessionSteering or AcpRpcMethods.XaiInterject
+                => HandleSessionSteerAsync(parameters, cancellationToken),
+            AcpRpcMethods.LegacySessionQueue or AcpRpcMethods.SessionQueue
+                => HandleSessionQueueAsync(parameters, cancellationToken),
+            AcpRpcMethods.LegacySessionQueueRemove or AcpRpcMethods.SessionQueueRemove
+                => HandleSessionQueueRemoveAsync(parameters, cancellationToken),
+            AcpRpcMethods.LegacySessionQueueClear or AcpRpcMethods.SessionQueueClear
+                => HandleSessionQueueClearAsync(parameters, cancellationToken),
+            AcpRpcMethods.LegacySessionInterruptAndPrompt or AcpRpcMethods.SessionInterruptAndPrompt
+                => HandleSessionInterruptAndPromptAsync(parameters, cancellationToken),
+            AcpRpcMethods.SessionSetModel => HandleSessionSetModelAsync(parameters, cancellationToken),
+            _ => Task.FromResult<JsonElement?>(JsonElementBuilder.EmptyObject)
+        };
+    }
+
+    private JsonElement BuildInitializeResponse()
+    {
+        return JsonElementBuilder.Build(w =>
+        {
+            w.WriteStartObject();
+            w.WriteNumber("protocolVersion", 1);
+            w.WritePropertyName("agentCapabilities");
+            w.WriteStartObject();
+            w.WriteBoolean("loadSession", true);
+            w.WritePropertyName("promptCapabilities");
+            w.WriteStartObject();
+            w.WriteBoolean("image", true);
+            w.WriteBoolean("embeddedContext", true);
+            w.WriteEndObject();
+            w.WriteEndObject();
+            w.WritePropertyName("agentInfo");
+            w.WriteStartObject();
+            w.WriteString("name", $"acplite ({_adapter.ShortId})");
+            w.WriteString("title", _adapter.DisplayName);
+            w.WriteString("version", "0.1.3");
+            w.WriteEndObject();
+            w.WriteEndObject();
+        });
+    }
+
+    private async Task<JsonElement?> HandleSessionCreateOrLoadAsync(
+        string method,
+        JsonElement? parameters,
+        CancellationToken cancellationToken)
+    {
+        var cwd = parameters.HasValue
+            ? parameters.Value.GetStringOrDefault("cwd", Environment.CurrentDirectory)
+            : Environment.CurrentDirectory;
+
+        var requestedSessionId = parameters.HasValue
+            ? parameters.Value.GetOptionalString("sessionId")
+            : null;
+
+        var handle = await _adapter.StartSessionAsync(new AcpSessionConfig
+        {
+            Provider = _adapter.Provider,
+            WorkingDirectory = cwd,
+            SessionId = requestedSessionId,
+            ResumeExisting = method == AcpRpcMethods.SessionLoad && !string.IsNullOrWhiteSpace(requestedSessionId),
+            BinaryPathOverride = _binaryPathOverride
+        }, cancellationToken).ConfigureAwait(false);
+
+        var ctx = new BridgeSessionContext(handle, _hostTransport);
+        _sessions[handle.SessionId] = ctx;
+        ctx.StartPump(cancellationToken);
+
+        return JsonElementBuilder.Build(w =>
+        {
+            w.WriteStartObject();
+            w.WriteString("sessionId", handle.SessionId);
+            w.WriteEndObject();
+        });
+    }
+
+    private async Task<JsonElement?> HandleSessionPromptAsync(
+        JsonElement? parameters,
+        CancellationToken cancellationToken)
+    {
+        var ctx = ResolveRequiredSession(parameters);
+        var promptText = ExtractPromptText(parameters);
+        var stopReason = await ctx.ExecutePromptTurnAsync(promptText, cancellationToken).ConfigureAwait(false);
+
+        return JsonElementBuilder.Build(w =>
+        {
+            w.WriteStartObject();
+            w.WriteString("stopReason", stopReason);
+            w.WriteEndObject();
+        });
+    }
+
+    private async Task<JsonElement?> HandleSessionSteerAsync(
+        JsonElement? parameters,
+        CancellationToken cancellationToken)
+    {
+        var ctx = ResolveRequiredSession(parameters);
+        var text = ExtractPromptText(parameters);
+        var accepted = await ctx.Handle.SteerAsync(text, cancellationToken).ConfigureAwait(false);
+        return JsonElementBuilder.Build(w =>
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("accepted", accepted);
+            w.WriteEndObject();
+        });
+    }
+
+    private async Task<JsonElement?> HandleSessionQueueAsync(
+        JsonElement? parameters,
+        CancellationToken cancellationToken)
+    {
+        var ctx = ResolveRequiredSession(parameters);
+        var text = ExtractPromptText(parameters);
+        var queuedItem = await ctx.Handle.EnqueuePromptAsync(text, cancellationToken).ConfigureAwait(false);
+        var queueCount = ctx.Handle.GetQueuedPrompts().Count;
+        return JsonElementBuilder.Build(w =>
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("queued", queuedItem is not null);
+            if (queuedItem is not null)
             {
-                return JsonElementBuilder.Build(w =>
-                {
-                    w.WriteStartObject();
-                    w.WriteNumber("protocolVersion", 1);
-                    w.WritePropertyName("agentCapabilities");
-                    w.WriteStartObject();
-                    w.WriteBoolean("loadSession", true);
-                    w.WritePropertyName("promptCapabilities");
-                    w.WriteStartObject();
-                    w.WriteBoolean("image", true);
-                    w.WriteBoolean("embeddedContext", true);
-                    w.WriteEndObject();
-                    w.WriteEndObject();
-                    w.WritePropertyName("agentInfo");
-                    w.WriteStartObject();
-                    w.WriteString("name", $"acplite ({_adapter.ShortId})");
-                    w.WriteString("title", _adapter.DisplayName);
-                    w.WriteString("version", "0.1.1");
-                    w.WriteEndObject();
-                    w.WriteEndObject();
-                });
+                w.WriteString("queueItemId", queuedItem.QueueItemId);
             }
+            w.WriteNumber("queueLength", queueCount);
+            w.WriteEndObject();
+        });
+    }
 
-            case "session/new":
-            case "session/load":
-            {
-                var cwd = parameters.HasValue
-                    ? parameters.Value.GetStringOrDefault("cwd", Environment.CurrentDirectory)
-                    : Environment.CurrentDirectory;
+    private async Task<JsonElement?> HandleSessionQueueRemoveAsync(
+        JsonElement? parameters,
+        CancellationToken cancellationToken)
+    {
+        var ctx = ResolveRequiredSession(parameters);
+        var queueItemId = parameters.HasValue ? parameters.Value.GetStringOrDefault("queueItemId") : string.Empty;
+        var removed = !string.IsNullOrWhiteSpace(queueItemId) &&
+                      await ctx.Handle.RemoveQueuedPromptAsync(queueItemId, cancellationToken).ConfigureAwait(false);
+        return JsonElementBuilder.Build(w =>
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("removed", removed);
+            w.WriteNumber("queueLength", ctx.Handle.GetQueuedPrompts().Count);
+            w.WriteEndObject();
+        });
+    }
 
-                var requestedSessionId = parameters.HasValue
-                    ? parameters.Value.GetOptionalString("sessionId")
-                    : null;
+    private async Task<JsonElement?> HandleSessionQueueClearAsync(
+        JsonElement? parameters,
+        CancellationToken cancellationToken)
+    {
+        var ctx = ResolveRequiredSession(parameters);
+        await ctx.Handle.ClearQueuedPromptsAsync(cancellationToken).ConfigureAwait(false);
+        return JsonElementBuilder.Build(w =>
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("cleared", true);
+            w.WriteEndObject();
+        });
+    }
 
-                var handle = await _adapter.StartSessionAsync(new AcpSessionConfig
-                {
-                    Provider = _adapter.Provider,
-                    WorkingDirectory = cwd,
-                    SessionId = requestedSessionId,
-                    ResumeExisting = method == "session/load" && !string.IsNullOrWhiteSpace(requestedSessionId),
-                    BinaryPathOverride = _binaryPathOverride
-                }, cancellationToken).ConfigureAwait(false);
+    private async Task<JsonElement?> HandleSessionInterruptAndPromptAsync(
+        JsonElement? parameters,
+        CancellationToken cancellationToken)
+    {
+        var ctx = ResolveRequiredSession(parameters);
+        var text = ExtractPromptText(parameters);
+        await ctx.Handle.InterruptAndSendPromptAsync(text, cancellationToken).ConfigureAwait(false);
+        return JsonElementBuilder.Build(w =>
+        {
+            w.WriteStartObject();
+            w.WriteBoolean("accepted", true);
+            w.WriteEndObject();
+        });
+    }
 
-                var ctx = new BridgeSessionContext(handle, _hostTransport);
-                _sessions[handle.SessionId] = ctx;
-                ctx.StartPump(cancellationToken);
+    private async Task<JsonElement?> HandleSessionSetModelAsync(
+        JsonElement? parameters,
+        CancellationToken cancellationToken)
+    {
+        var sessionId = ExtractSessionId(parameters);
+        var modelId = parameters.HasValue ? parameters.Value.GetStringOrDefault("modelId") : string.Empty;
 
-                return JsonElementBuilder.Build(w =>
-                {
-                    w.WriteStartObject();
-                    w.WriteString("sessionId", handle.SessionId);
-                    w.WriteEndObject();
-                });
-            }
-
-            case "session/prompt":
-            {
-                var sessionId = ExtractSessionId(parameters);
-                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
-                {
-                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
-                }
-
-                var promptText = ExtractPromptText(parameters);
-                var stopReason = await ctx.ExecutePromptTurnAsync(promptText, cancellationToken).ConfigureAwait(false);
-
-                return JsonElementBuilder.Build(w =>
-                {
-                    w.WriteStartObject();
-                    w.WriteString("stopReason", stopReason);
-                    w.WriteEndObject();
-                });
-            }
-
-            case "_session/steering":
-            case "_x.ai/interject":
-            {
-                var sessionId = ExtractSessionId(parameters);
-                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
-                {
-                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
-                }
-
-                var text = ExtractPromptText(parameters);
-                var accepted = await ctx.Handle.SteerAsync(text, cancellationToken).ConfigureAwait(false);
-                return JsonElementBuilder.Build(w =>
-                {
-                    w.WriteStartObject();
-                    w.WriteBoolean("accepted", accepted);
-                    w.WriteEndObject();
-                });
-            }
-
-            case "_session/queue":
-            case "session/queue":
-            {
-                var sessionId = ExtractSessionId(parameters);
-                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
-                {
-                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
-                }
-
-                var text = ExtractPromptText(parameters);
-                var queuedItem = await ctx.Handle.EnqueuePromptAsync(text, cancellationToken).ConfigureAwait(false);
-                var queueCount = ctx.Handle.GetQueuedPrompts().Count;
-                return JsonElementBuilder.Build(w =>
-                {
-                    w.WriteStartObject();
-                    w.WriteBoolean("queued", queuedItem is not null);
-                    if (queuedItem is not null)
-                    {
-                        w.WriteString("queueItemId", queuedItem.QueueItemId);
-                    }
-                    w.WriteNumber("queueLength", queueCount);
-                    w.WriteEndObject();
-                });
-            }
-
-            case "_session/queue/remove":
-            case "session/queue_remove":
-            {
-                var sessionId = ExtractSessionId(parameters);
-                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
-                {
-                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
-                }
-
-                var queueItemId = parameters.HasValue ? parameters.Value.GetStringOrDefault("queueItemId") : string.Empty;
-                var removed = !string.IsNullOrWhiteSpace(queueItemId) &&
-                              await ctx.Handle.RemoveQueuedPromptAsync(queueItemId, cancellationToken).ConfigureAwait(false);
-                return JsonElementBuilder.Build(w =>
-                {
-                    w.WriteStartObject();
-                    w.WriteBoolean("removed", removed);
-                    w.WriteNumber("queueLength", ctx.Handle.GetQueuedPrompts().Count);
-                    w.WriteEndObject();
-                });
-            }
-
-            case "_session/queue/clear":
-            case "session/queue_clear":
-            {
-                var sessionId = ExtractSessionId(parameters);
-                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
-                {
-                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
-                }
-
-                await ctx.Handle.ClearQueuedPromptsAsync(cancellationToken).ConfigureAwait(false);
-                return JsonElementBuilder.Build(w =>
-                {
-                    w.WriteStartObject();
-                    w.WriteBoolean("cleared", true);
-                    w.WriteEndObject();
-                });
-            }
-
-            case "_session/interrupt_and_prompt":
-            case "session/interrupt_and_prompt":
-            {
-                var sessionId = ExtractSessionId(parameters);
-                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
-                {
-                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
-                }
-
-                var text = ExtractPromptText(parameters);
-                await ctx.Handle.InterruptAndSendPromptAsync(text, cancellationToken).ConfigureAwait(false);
-                return JsonElementBuilder.Build(w =>
-                {
-                    w.WriteStartObject();
-                    w.WriteBoolean("accepted", true);
-                    w.WriteEndObject();
-                });
-            }
-
-            case "session/set_model":
-            {
-                var sessionId = ExtractSessionId(parameters);
-                var modelId = parameters.HasValue ? parameters.Value.GetStringOrDefault("modelId") : string.Empty;
-
-                if (!string.IsNullOrEmpty(sessionId) &&
-                    !string.IsNullOrEmpty(modelId) &&
-                    _sessions.TryGetValue(sessionId, out var ctx))
-                {
-                    await ctx.Handle.SetModelAsync(modelId, cancellationToken).ConfigureAwait(false);
-                }
-
-                return JsonElementBuilder.EmptyObject;
-            }
-
-            default:
-                return JsonElementBuilder.EmptyObject;
+        if (!string.IsNullOrEmpty(sessionId) &&
+            !string.IsNullOrEmpty(modelId) &&
+            _sessions.TryGetValue(sessionId, out var ctx))
+        {
+            await ctx.Handle.SetModelAsync(modelId, cancellationToken).ConfigureAwait(false);
         }
+
+        return JsonElementBuilder.EmptyObject;
+    }
+
+    private BridgeSessionContext ResolveRequiredSession(JsonElement? parameters)
+    {
+        var sessionId = ExtractSessionId(parameters);
+        if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
+        {
+            throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
+        }
+        return ctx;
     }
 
     private async Task HandleHostNotificationAsync(
@@ -265,7 +270,7 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
         JsonElement? parameters,
         CancellationToken cancellationToken)
     {
-        if (method == "session/cancel")
+        if (method == AcpRpcMethods.SessionCancel)
         {
             var sessionId = ExtractSessionId(parameters);
             if (!string.IsNullOrEmpty(sessionId) && _sessions.TryGetValue(sessionId, out var ctx))
@@ -398,11 +403,11 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                     switch (ev)
                     {
                         case AcpAssistantTextDeltaEvent textDelta:
-                            await SendTextChunkUpdateAsync("agent_message_chunk", textDelta.Delta, cancellationToken).ConfigureAwait(false);
+                            await SendTextChunkUpdateAsync(AcpSessionUpdateKinds.AgentMessageChunk, textDelta.Delta, cancellationToken).ConfigureAwait(false);
                             break;
 
                         case AcpThinkingDeltaEvent thoughtDelta:
-                            await SendTextChunkUpdateAsync("agent_thought_chunk", thoughtDelta.Delta, cancellationToken).ConfigureAwait(false);
+                            await SendTextChunkUpdateAsync(AcpSessionUpdateKinds.AgentThoughtChunk, thoughtDelta.Delta, cancellationToken).ConfigureAwait(false);
                             break;
 
                         case AcpToolCallEvent toolCall:
@@ -433,7 +438,7 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
             }
             finally
             {
-                Volatile.Read(ref _activeTurnTcs)?.TrySetResult("end_turn");
+                Volatile.Read(ref _activeTurnTcs)?.TrySetResult(AcpStopReasons.EndTurn);
             }
         }
 
@@ -445,7 +450,7 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                 w.WriteString("sessionId", Handle.SessionId);
                 w.WritePropertyName("update");
                 w.WriteStartObject();
-                w.WriteString("sessionUpdate", "prompt_queue_update");
+                w.WriteString("sessionUpdate", AcpSessionUpdateKinds.PromptQueueUpdate);
                 w.WritePropertyName("queuedPrompts");
                 w.WriteStartArray();
                 foreach (var item in queueUpdated.QueuedPrompts)
@@ -460,7 +465,7 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                 w.WriteEndObject();
                 w.WriteEndObject();
             });
-            return _hostTransport.SendNotificationAsync("session/update", updateParams, cancellationToken);
+            return _hostTransport.SendNotificationAsync(AcpRpcMethods.SessionUpdate, updateParams, cancellationToken);
         }
 
         private Task SendTextChunkUpdateAsync(string sessionUpdateKind, string text, CancellationToken cancellationToken)
@@ -480,18 +485,22 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                 w.WriteEndObject();
                 w.WriteEndObject();
             });
-            return _hostTransport.SendNotificationAsync("session/update", updateParams, cancellationToken);
+            return _hostTransport.SendNotificationAsync(AcpRpcMethods.SessionUpdate, updateParams, cancellationToken);
         }
 
         private Task SendToolCallUpdateAsync(AcpToolCallEvent toolCall, CancellationToken cancellationToken)
         {
+            var updateKind = toolCall.Status == AcpToolStatuses.InProgress
+                ? AcpSessionUpdateKinds.ToolCall
+                : AcpSessionUpdateKinds.ToolCallUpdate;
+
             var updateParams = JsonElementBuilder.Build(w =>
             {
                 w.WriteStartObject();
                 w.WriteString("sessionId", Handle.SessionId);
                 w.WritePropertyName("update");
                 w.WriteStartObject();
-                w.WriteString("sessionUpdate", toolCall.Status == "in_progress" ? "tool_call" : "tool_call_update");
+                w.WriteString("sessionUpdate", updateKind);
                 w.WriteString("toolCallId", toolCall.ToolCallId);
                 w.WriteString("title", toolCall.Title);
                 w.WriteString("kind", toolCall.Kind);
@@ -499,7 +508,7 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                 w.WriteEndObject();
                 w.WriteEndObject();
             });
-            return _hostTransport.SendNotificationAsync("session/update", updateParams, cancellationToken);
+            return _hostTransport.SendNotificationAsync(AcpRpcMethods.SessionUpdate, updateParams, cancellationToken);
         }
 
         private async Task ForwardPermissionRequestAsync(
@@ -532,7 +541,7 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                     w.WriteEndObject();
                 });
 
-                var hostDecision = await _hostTransport.SendRequestAsync("session/request_permission", permParams, cancellationToken).ConfigureAwait(false);
+                var hostDecision = await _hostTransport.SendRequestAsync(AcpRpcMethods.SessionRequestPermission, permParams, cancellationToken).ConfigureAwait(false);
                 string? selectedOpt = null;
                 if (hostDecision.TryGetObject("outcome", out var outcome))
                 {
@@ -540,9 +549,9 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                 }
 
                 var isApproved = selectedOpt is null ||
-                    (!selectedOpt.Contains("deny", StringComparison.OrdinalIgnoreCase) &&
+                    (!selectedOpt.Contains(AcpPermissionOptions.DenyId, StringComparison.OrdinalIgnoreCase) &&
                      !selectedOpt.Contains("reject", StringComparison.OrdinalIgnoreCase) &&
-                     !selectedOpt.Contains("decline", StringComparison.OrdinalIgnoreCase));
+                     !selectedOpt.Contains(AcpPermissionOptions.DeclineId, StringComparison.OrdinalIgnoreCase));
 
                 await Handle.RespondPermissionAsync(perm.RequestId, isApproved, selectedOpt, cancellationToken).ConfigureAwait(false);
             }

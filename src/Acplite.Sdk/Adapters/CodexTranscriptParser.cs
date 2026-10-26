@@ -217,7 +217,7 @@ internal static class CodexTranscriptParser
                         var message = payload.GetOptionalString("message");
                         if (!string.IsNullOrEmpty(message) && !TextSanitizer.IsCodexInjectedUserContext(message))
                         {
-                            yield return new AcpTranscriptHistoryEntryEvent(AgentProviderKind.Codex, sessionId, timestamp, "user", message.Trim());
+                            yield return new AcpTranscriptHistoryEntryEvent(AgentProviderKind.Codex, sessionId, timestamp, AcpRoles.User, message.Trim());
                         }
                         break;
                     }
@@ -227,7 +227,7 @@ internal static class CodexTranscriptParser
                         var message = payload.GetOptionalString("message");
                         if (!string.IsNullOrEmpty(message))
                         {
-                            yield return new AcpTranscriptHistoryEntryEvent(AgentProviderKind.Codex, sessionId, timestamp, "assistant", message.Trim());
+                            yield return new AcpTranscriptHistoryEntryEvent(AgentProviderKind.Codex, sessionId, timestamp, AcpRoles.Assistant, message.Trim());
                         }
                         break;
                     }
@@ -237,7 +237,7 @@ internal static class CodexTranscriptParser
                         var reasoning = payload.GetOptionalString("text");
                         if (!string.IsNullOrEmpty(reasoning))
                         {
-                            yield return new AcpTranscriptHistoryEntryEvent(AgentProviderKind.Codex, sessionId, timestamp, "assistant", string.Empty, Thinking: reasoning.Trim());
+                            yield return new AcpTranscriptHistoryEntryEvent(AgentProviderKind.Codex, sessionId, timestamp, AcpRoles.Assistant, string.Empty, Thinking: reasoning.Trim());
                         }
                         break;
                     }
@@ -252,7 +252,7 @@ internal static class CodexTranscriptParser
                 case "message":
                 {
                     var role = payload.GetOptionalString("role");
-                    if (role == "user")
+                    if (role == AcpRoles.User)
                     {
                         var text = ExtractCodexMessageContent(payload);
                         if (!string.IsNullOrWhiteSpace(text) && !TextSanitizer.IsCodexInjectedUserContext(text))
@@ -261,11 +261,11 @@ internal static class CodexTranscriptParser
                                 Provider: AgentProviderKind.Codex,
                                 SessionId: sessionId,
                                 Timestamp: timestamp,
-                                Role: "user",
+                                Role: AcpRoles.User,
                                 Text: text);
                         }
                     }
-                    else if (role == "assistant")
+                    else if (role == AcpRoles.Assistant)
                     {
                         var text = ExtractCodexMessageContent(payload);
                         if (!string.IsNullOrWhiteSpace(text))
@@ -274,7 +274,7 @@ internal static class CodexTranscriptParser
                                 Provider: AgentProviderKind.Codex,
                                 SessionId: sessionId,
                                 Timestamp: timestamp,
-                                Role: "assistant",
+                                Role: AcpRoles.Assistant,
                                 Text: text);
                         }
                     }
@@ -290,7 +290,7 @@ internal static class CodexTranscriptParser
                             Provider: AgentProviderKind.Codex,
                             SessionId: sessionId,
                             Timestamp: timestamp,
-                            Role: "assistant",
+                            Role: AcpRoles.Assistant,
                             Text: string.Empty,
                             Thinking: thinkingText);
                     }
@@ -314,7 +314,7 @@ internal static class CodexTranscriptParser
                             ToolName: toolName,
                             Title: !string.IsNullOrWhiteSpace(summary) ? summary : toolName,
                             Kind: TextSanitizer.InferToolKind(toolName),
-                            Status: "completed",
+                            Status: AcpToolStatuses.Completed,
                             RawInputJson: rawInput);
                     }
                     break;
@@ -335,8 +335,8 @@ internal static class CodexTranscriptParser
                         ToolCallId: callId,
                         ToolName: "subagent",
                         Title: summary,
-                        Kind: "other",
-                        Status: "completed",
+                        Kind: AcpToolKinds.Other,
+                        Status: AcpToolStatuses.Completed,
                         RawInputJson: cleanBody);
                     break;
                 }

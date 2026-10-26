@@ -172,7 +172,7 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
                                 ToolName: toolName!,
                                 Title: !string.IsNullOrWhiteSpace(argSummary) ? argSummary! : toolName!,
                                 Kind: TextSanitizer.InferToolKind(toolName),
-                                Status: "completed",
+                                Status: AcpToolStatuses.Completed,
                                 RawInputJson: rawInput));
                         }
                     }
@@ -213,7 +213,7 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
                     var errText = root.GetStringOrDefault("result", "Antigravity error");
                     PublishClassifiedError(errText);
                 }
-                PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, now, isError ? "error" : "end_turn"));
+                PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, now, isError ? AcpStopReasons.Error : AcpStopReasons.EndTurn));
                 break;
             }
         }

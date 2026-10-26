@@ -126,17 +126,17 @@ public sealed record AcpQueuedPromptItem(
     DateTimeOffset EnqueuedAt);
 
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
-[JsonDerivedType(typeof(AcpSessionStartedEvent), "session_started")]
-[JsonDerivedType(typeof(AcpAssistantTextDeltaEvent), "assistant_text_delta")]
-[JsonDerivedType(typeof(AcpThinkingDeltaEvent), "thinking_delta")]
-[JsonDerivedType(typeof(AcpToolCallEvent), "tool_call")]
-[JsonDerivedType(typeof(AcpPermissionRequestEvent), "permission_request")]
-[JsonDerivedType(typeof(AcpPlanUpdateEvent), "plan_update")]
-[JsonDerivedType(typeof(AcpUsageSnapshotEvent), "usage_snapshot")]
-[JsonDerivedType(typeof(AcpTurnCompletedEvent), "turn_completed")]
-[JsonDerivedType(typeof(AcpInterruptionEvent), "interruption")]
-[JsonDerivedType(typeof(AcpPromptQueueUpdatedEvent), "prompt_queue_updated")]
-[JsonDerivedType(typeof(AcpTranscriptHistoryEntryEvent), "transcript_history_entry")]
+[JsonDerivedType(typeof(AcpSessionStartedEvent), AcpEventKinds.SessionStarted)]
+[JsonDerivedType(typeof(AcpAssistantTextDeltaEvent), AcpEventKinds.AssistantTextDelta)]
+[JsonDerivedType(typeof(AcpThinkingDeltaEvent), AcpEventKinds.ThinkingDelta)]
+[JsonDerivedType(typeof(AcpToolCallEvent), AcpEventKinds.ToolCall)]
+[JsonDerivedType(typeof(AcpPermissionRequestEvent), AcpEventKinds.PermissionRequest)]
+[JsonDerivedType(typeof(AcpPlanUpdateEvent), AcpEventKinds.PlanUpdate)]
+[JsonDerivedType(typeof(AcpUsageSnapshotEvent), AcpEventKinds.UsageSnapshot)]
+[JsonDerivedType(typeof(AcpTurnCompletedEvent), AcpEventKinds.TurnCompleted)]
+[JsonDerivedType(typeof(AcpInterruptionEvent), AcpEventKinds.Interruption)]
+[JsonDerivedType(typeof(AcpPromptQueueUpdatedEvent), AcpEventKinds.PromptQueueUpdated)]
+[JsonDerivedType(typeof(AcpTranscriptHistoryEntryEvent), AcpEventKinds.TranscriptHistoryEntry)]
 public abstract record AcpEvent(
     AgentProviderKind Provider,
     string SessionId,

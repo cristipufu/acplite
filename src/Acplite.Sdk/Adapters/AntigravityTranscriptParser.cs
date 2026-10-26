@@ -120,7 +120,7 @@ internal static class AntigravityTranscriptParser
                         Provider: AgentProviderKind.Antigravity,
                         SessionId: sessionId,
                         Timestamp: timestamp,
-                        Role: "user",
+                        Role: AcpRoles.User,
                         Text: content);
                 }
             }
@@ -135,7 +135,7 @@ internal static class AntigravityTranscriptParser
                         Provider: AgentProviderKind.Antigravity,
                         SessionId: sessionId,
                         Timestamp: timestamp,
-                        Role: "assistant",
+                        Role: AcpRoles.Assistant,
                         Text: content,
                         Thinking: thinking,
                         ToolName: null);
@@ -165,7 +165,7 @@ internal static class AntigravityTranscriptParser
                                 ToolName: toolName!,
                                 Title: !string.IsNullOrWhiteSpace(argSummary) ? argSummary! : toolName!,
                                 Kind: TextSanitizer.InferToolKind(toolName),
-                                Status: "completed",
+                                Status: AcpToolStatuses.Completed,
                                 RawInputJson: rawInput);
                         }
                     }

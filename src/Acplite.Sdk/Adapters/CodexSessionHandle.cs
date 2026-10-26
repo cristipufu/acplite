@@ -298,7 +298,7 @@ internal sealed class CodexSessionHandle : AcpSessionHandleBase
         }
 
         var toolId = item.GetStringOrDefault("id", Guid.NewGuid().ToString("N"));
-        var status = method == "item/started" ? "in_progress" : "completed";
+        var status = method == "item/started" ? AcpToolStatuses.InProgress : AcpToolStatuses.Completed;
         var title = itemType == "commandExecution"
             ? item.GetStringOrDefault("command", itemType)
             : itemType;
@@ -317,10 +317,10 @@ internal sealed class CodexSessionHandle : AcpSessionHandleBase
 
     private void HandleTurnCompletedNotification(JsonElement p, DateTimeOffset now)
     {
-        var status = "end_turn";
+        var status = AcpStopReasons.EndTurn;
         if (p.TryGetObject("turn", out var turn))
         {
-            status = turn.GetStringOrDefault("status", "end_turn");
+            status = turn.GetStringOrDefault("status", AcpStopReasons.EndTurn);
             if (turn.TryGetObject("error", out var err))
             {
                 PublishClassifiedError(err.GetStringOrDefault("message", "Codex turn error"));
@@ -366,11 +366,7 @@ internal sealed class CodexSessionHandle : AcpSessionHandleBase
                 Title: $"Approve {cmdText}?",
                 Description: cmdText,
                 RawInputJson: parameters?.GetRawText(),
-                Options:
-                [
-                    new AcpPermissionOption("accept", "Accept", "allow_once"),
-                    new AcpPermissionOption("decline", "Decline", "reject_once")
-                ]));
+                Options: AcpPermissionOptions.DefaultAcceptDecline));
 
             var (approved, _) = await tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             return BuildDecisionPayload(approved);

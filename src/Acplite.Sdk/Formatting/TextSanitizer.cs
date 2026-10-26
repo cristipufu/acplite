@@ -8,7 +8,7 @@ namespace Acplite.Sdk.Formatting;
 /// Pure helper methods for normalizing single-line session titles, extracting user requests,
 /// summarizing tool call arguments, and inferring tool categories across adapters.
 /// </summary>
-internal static class TextSanitizer
+public static class TextSanitizer
 {
     public static string TruncateSingleLine(string? input, int maxLength = 80)
     {
@@ -30,23 +30,23 @@ internal static class TextSanitizer
     {
         if (string.IsNullOrWhiteSpace(toolName))
         {
-            return "other";
+            return AcpToolKinds.Other;
         }
 
         var lower = toolName.ToLowerInvariant();
         if (lower.Contains("bash") || lower.Contains("command") || lower.Contains("exec") || lower.Contains("shell"))
         {
-            return "execute";
+            return AcpToolKinds.Execute;
         }
         if (lower.Contains("edit") || lower.Contains("write") || lower.Contains("patch") || lower.Contains("filechange"))
         {
-            return "edit";
+            return AcpToolKinds.Edit;
         }
         if (lower.Contains("read") || lower.Contains("glob") || lower.Contains("grep") || lower.Contains("search") || lower.Contains("find"))
         {
-            return "read";
+            return AcpToolKinds.Read;
         }
-        return "other";
+        return AcpToolKinds.Other;
     }
 
     public static string ExtractAntigravityUserPrompt(string? rawContent)
