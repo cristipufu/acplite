@@ -23,10 +23,18 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
 
     private readonly ConcurrentQueue<string> _recentStderrLines = new();
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
+    private readonly SemaphoreSlim _turnStateGate = new(1, 1);
+    private readonly List<AcpQueuedPromptItem> _promptQueue = [];
     private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly Process? _process;
+    private volatile AcpQueuedPromptItem[] _promptQueueSnapshot = [];
+    private TaskCompletionSource<string>? _activeTurnCompletionTcs;
     private Task? _stderrPumpTask;
     private Task? _exitMonitorTask;
+    private long _activeTurnGeneration;
+    private long _queueItemCounter;
+    private int _isTurnActive;
+    private int _suppressAutoDrain;
     private int _isDisposing;
 
     protected AcpSessionConfig Config { get; }
@@ -61,7 +69,10 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
     public string SessionId { get; protected set; }
     public string WorkingDirectory => Config.WorkingDirectory;
     public virtual bool SupportsLiveSteering => true;
+    public bool IsTurnActive => Volatile.Read(ref _isTurnActive) != 0;
     protected CancellationToken LifetimeToken => _lifetimeCts.Token;
+
+    public IReadOnlyList<AcpQueuedPromptItem> GetQueuedPrompts() => _promptQueueSnapshot;
 
     protected void StartBackgroundMonitors()
     {
@@ -79,9 +90,18 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
 
     protected void PublishEvent(AcpEvent acpEvent)
     {
-        if (Volatile.Read(ref _isDisposing) == 0)
+        if (Volatile.Read(ref _isDisposing) != 0)
         {
-            _events.Writer.TryWrite(acpEvent);
+            return;
+        }
+
+        _events.Writer.TryWrite(acpEvent);
+
+        if (acpEvent is AcpTurnCompletedEvent completed)
+        {
+            var completedGen = Volatile.Read(ref _activeTurnGeneration);
+            Volatile.Read(ref _activeTurnCompletionTcs)?.TrySetResult(completed.StopReason);
+            _ = CompleteTurnAndDrainQueueAsync(completed.StopReason, completedGen);
         }
     }
 
@@ -93,7 +113,255 @@ public abstract class AcpSessionHandleBase : IAcpSessionHandle
     }
 
     public abstract Task InitializeAsync(CancellationToken cancellationToken = default);
-    public abstract Task SendPromptAsync(string prompt, CancellationToken cancellationToken = default);
+
+    public async Task SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+
+        await _turnStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Volatile.Write(ref _isTurnActive, 1);
+            Interlocked.Increment(ref _activeTurnGeneration);
+            Volatile.Write(
+                ref _activeTurnCompletionTcs,
+                new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
+        }
+        finally
+        {
+            _turnStateGate.Release();
+        }
+
+        try
+        {
+            await SendPromptCoreAsync(prompt, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            Volatile.Write(ref _isTurnActive, 0);
+            Volatile.Read(ref _activeTurnCompletionTcs)?.TrySetResult("error");
+            throw;
+        }
+    }
+
+    protected abstract Task SendPromptCoreAsync(string prompt, CancellationToken cancellationToken = default);
+
+    public async Task<AcpQueuedPromptItem?> EnqueuePromptAsync(string prompt, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+
+        AcpQueuedPromptItem? queuedItem = null;
+        AcpQueuedPromptItem[]? snapshotToPublish = null;
+
+        await _turnStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (Volatile.Read(ref _isTurnActive) != 0)
+            {
+                queuedItem = new AcpQueuedPromptItem(
+                    QueueItemId: $"q_{Interlocked.Increment(ref _queueItemCounter)}",
+                    Prompt: prompt,
+                    EnqueuedAt: DateTimeOffset.UtcNow);
+                _promptQueue.Add(queuedItem);
+                snapshotToPublish = _promptQueue.ToArray();
+                _promptQueueSnapshot = snapshotToPublish;
+            }
+            else
+            {
+                Volatile.Write(ref _isTurnActive, 1);
+                Interlocked.Increment(ref _activeTurnGeneration);
+                Volatile.Write(
+                    ref _activeTurnCompletionTcs,
+                    new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
+            }
+        }
+        finally
+        {
+            _turnStateGate.Release();
+        }
+
+        if (queuedItem is not null)
+        {
+            PublishEvent(new AcpPromptQueueUpdatedEvent(Provider, SessionId, DateTimeOffset.UtcNow, snapshotToPublish!));
+            return queuedItem;
+        }
+
+        try
+        {
+            await SendPromptCoreAsync(prompt, cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+        catch
+        {
+            Volatile.Write(ref _isTurnActive, 0);
+            Volatile.Read(ref _activeTurnCompletionTcs)?.TrySetResult("error");
+            throw;
+        }
+    }
+
+    public async Task<bool> RemoveQueuedPromptAsync(string queueItemId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(queueItemId);
+
+        AcpQueuedPromptItem[]? snapshotToPublish = null;
+        var removed = false;
+
+        await _turnStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            for (var i = 0; i < _promptQueue.Count; i++)
+            {
+                if (string.Equals(_promptQueue[i].QueueItemId, queueItemId, StringComparison.Ordinal))
+                {
+                    _promptQueue.RemoveAt(i);
+                    removed = true;
+                    snapshotToPublish = _promptQueue.ToArray();
+                    _promptQueueSnapshot = snapshotToPublish;
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _turnStateGate.Release();
+        }
+
+        if (removed)
+        {
+            PublishEvent(new AcpPromptQueueUpdatedEvent(Provider, SessionId, DateTimeOffset.UtcNow, snapshotToPublish!));
+        }
+
+        return removed;
+    }
+
+    public async Task ClearQueuedPromptsAsync(CancellationToken cancellationToken = default)
+    {
+        var hadItems = false;
+
+        await _turnStateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_promptQueue.Count > 0)
+            {
+                _promptQueue.Clear();
+                _promptQueueSnapshot = [];
+                hadItems = true;
+            }
+        }
+        finally
+        {
+            _turnStateGate.Release();
+        }
+
+        if (hadItems)
+        {
+            PublishEvent(new AcpPromptQueueUpdatedEvent(Provider, SessionId, DateTimeOffset.UtcNow, []));
+        }
+    }
+
+    public async Task InterruptAndSendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+
+        Interlocked.Exchange(ref _suppressAutoDrain, 1);
+        try
+        {
+            if (IsTurnActive)
+            {
+                var activeTcs = Volatile.Read(ref _activeTurnCompletionTcs);
+                await CancelTurnAsync(cancellationToken).ConfigureAwait(false);
+                if (activeTcs is not null)
+                {
+                    try
+                    {
+                        await activeTcs.Task.WaitAsync(TimeSpan.FromMilliseconds(500), cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        // Underlying agent CLI may not emit a turn-end frame on interrupt; proceed with the new turn
+                    }
+                }
+            }
+
+            await SendPromptAsync(prompt, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _suppressAutoDrain, 0);
+        }
+    }
+
+    private async Task CompleteTurnAndDrainQueueAsync(string stopReason, long completedGen)
+    {
+        AcpQueuedPromptItem? nextItem = null;
+        AcpQueuedPromptItem[]? snapshotToPublish = null;
+
+        try
+        {
+            await _turnStateGate.WaitAsync(_lifetimeCts.Token).ConfigureAwait(false);
+            try
+            {
+                if (Volatile.Read(ref _activeTurnGeneration) != completedGen)
+                {
+                    return;
+                }
+
+                var canAutoDrain = Volatile.Read(ref _suppressAutoDrain) == 0 &&
+                                   ShouldAutoDrainQueue(stopReason);
+
+                if (canAutoDrain && _promptQueue.Count > 0)
+                {
+                    nextItem = _promptQueue[0];
+                    _promptQueue.RemoveAt(0);
+                    snapshotToPublish = _promptQueue.ToArray();
+                    _promptQueueSnapshot = snapshotToPublish;
+                    Volatile.Write(ref _isTurnActive, 1);
+                    Interlocked.Increment(ref _activeTurnGeneration);
+                    Volatile.Write(
+                        ref _activeTurnCompletionTcs,
+                        new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously));
+                }
+                else
+                {
+                    Volatile.Write(ref _isTurnActive, 0);
+                }
+            }
+            finally
+            {
+                _turnStateGate.Release();
+            }
+
+            if (nextItem is not null)
+            {
+                PublishEvent(new AcpPromptQueueUpdatedEvent(Provider, SessionId, DateTimeOffset.UtcNow, snapshotToPublish!));
+                await SendPromptCoreAsync(nextItem.Prompt, _lifetimeCts.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (_lifetimeCts.IsCancellationRequested)
+        {
+            // Normal shutdown
+        }
+        catch (Exception ex)
+        {
+            Volatile.Write(ref _isTurnActive, 0);
+            PublishClassifiedError(ex.Message, "queue_drain_error");
+            PublishEvent(new AcpTurnCompletedEvent(Provider, SessionId, DateTimeOffset.UtcNow, "error"));
+        }
+    }
+
+    private static bool ShouldAutoDrainQueue(string? stopReason)
+    {
+        if (string.IsNullOrWhiteSpace(stopReason))
+        {
+            return true;
+        }
+
+        return !stopReason.Equals("error", StringComparison.OrdinalIgnoreCase) &&
+               !stopReason.Equals("cancelled", StringComparison.OrdinalIgnoreCase) &&
+               !stopReason.Equals("canceled", StringComparison.OrdinalIgnoreCase) &&
+               !stopReason.Equals("interrupted", StringComparison.OrdinalIgnoreCase);
+    }
+
     public abstract Task<bool> SteerAsync(string steeringPrompt, CancellationToken cancellationToken = default);
     public abstract Task RespondPermissionAsync(
         string requestId,

@@ -81,7 +81,7 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                     w.WriteStartObject();
                     w.WriteString("name", $"acplite ({_adapter.ShortId})");
                     w.WriteString("title", _adapter.DisplayName);
-                    w.WriteString("version", "0.1.0");
+                    w.WriteString("version", "0.1.1");
                     w.WriteEndObject();
                     w.WriteEndObject();
                 });
@@ -153,6 +153,89 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                 {
                     w.WriteStartObject();
                     w.WriteBoolean("accepted", accepted);
+                    w.WriteEndObject();
+                });
+            }
+
+            case "_session/queue":
+            case "session/queue":
+            {
+                var sessionId = ExtractSessionId(parameters);
+                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
+                {
+                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
+                }
+
+                var text = ExtractPromptText(parameters);
+                var queuedItem = await ctx.Handle.EnqueuePromptAsync(text, cancellationToken).ConfigureAwait(false);
+                var queueCount = ctx.Handle.GetQueuedPrompts().Count;
+                return JsonElementBuilder.Build(w =>
+                {
+                    w.WriteStartObject();
+                    w.WriteBoolean("queued", queuedItem is not null);
+                    if (queuedItem is not null)
+                    {
+                        w.WriteString("queueItemId", queuedItem.QueueItemId);
+                    }
+                    w.WriteNumber("queueLength", queueCount);
+                    w.WriteEndObject();
+                });
+            }
+
+            case "_session/queue/remove":
+            case "session/queue_remove":
+            {
+                var sessionId = ExtractSessionId(parameters);
+                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
+                {
+                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
+                }
+
+                var queueItemId = parameters.HasValue ? parameters.Value.GetStringOrDefault("queueItemId") : string.Empty;
+                var removed = !string.IsNullOrWhiteSpace(queueItemId) &&
+                              await ctx.Handle.RemoveQueuedPromptAsync(queueItemId, cancellationToken).ConfigureAwait(false);
+                return JsonElementBuilder.Build(w =>
+                {
+                    w.WriteStartObject();
+                    w.WriteBoolean("removed", removed);
+                    w.WriteNumber("queueLength", ctx.Handle.GetQueuedPrompts().Count);
+                    w.WriteEndObject();
+                });
+            }
+
+            case "_session/queue/clear":
+            case "session/queue_clear":
+            {
+                var sessionId = ExtractSessionId(parameters);
+                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
+                {
+                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
+                }
+
+                await ctx.Handle.ClearQueuedPromptsAsync(cancellationToken).ConfigureAwait(false);
+                return JsonElementBuilder.Build(w =>
+                {
+                    w.WriteStartObject();
+                    w.WriteBoolean("cleared", true);
+                    w.WriteEndObject();
+                });
+            }
+
+            case "_session/interrupt_and_prompt":
+            case "session/interrupt_and_prompt":
+            {
+                var sessionId = ExtractSessionId(parameters);
+                if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGetValue(sessionId, out var ctx))
+                {
+                    throw new InvalidOperationException($"Unknown ACP session '{sessionId}'.");
+                }
+
+                var text = ExtractPromptText(parameters);
+                await ctx.Handle.InterruptAndSendPromptAsync(text, cancellationToken).ConfigureAwait(false);
+                return JsonElementBuilder.Build(w =>
+                {
+                    w.WriteStartObject();
+                    w.WriteBoolean("accepted", true);
                     w.WriteEndObject();
                 });
             }
@@ -337,6 +420,10 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
                         case AcpTurnCompletedEvent completed:
                             Volatile.Read(ref _activeTurnTcs)?.TrySetResult(completed.StopReason);
                             break;
+
+                        case AcpPromptQueueUpdatedEvent queueUpdated:
+                            await SendPromptQueueUpdateAsync(queueUpdated, cancellationToken).ConfigureAwait(false);
+                            break;
                     }
                 }
             }
@@ -348,6 +435,32 @@ public sealed class AcpStdioServerBridge : IAsyncDisposable
             {
                 Volatile.Read(ref _activeTurnTcs)?.TrySetResult("end_turn");
             }
+        }
+
+        private Task SendPromptQueueUpdateAsync(AcpPromptQueueUpdatedEvent queueUpdated, CancellationToken cancellationToken)
+        {
+            var updateParams = JsonElementBuilder.Build(w =>
+            {
+                w.WriteStartObject();
+                w.WriteString("sessionId", Handle.SessionId);
+                w.WritePropertyName("update");
+                w.WriteStartObject();
+                w.WriteString("sessionUpdate", "prompt_queue_update");
+                w.WritePropertyName("queuedPrompts");
+                w.WriteStartArray();
+                foreach (var item in queueUpdated.QueuedPrompts)
+                {
+                    w.WriteStartObject();
+                    w.WriteString("queueItemId", item.QueueItemId);
+                    w.WriteString("prompt", item.Prompt);
+                    w.WriteString("enqueuedAt", item.EnqueuedAt.ToString("O"));
+                    w.WriteEndObject();
+                }
+                w.WriteEndArray();
+                w.WriteEndObject();
+                w.WriteEndObject();
+            });
+            return _hostTransport.SendNotificationAsync("session/update", updateParams, cancellationToken);
         }
 
         private Task SendTextChunkUpdateAsync(string sessionUpdateKind, string text, CancellationToken cancellationToken)

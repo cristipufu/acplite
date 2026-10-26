@@ -862,6 +862,119 @@ public sealed class AdapterAndBridgeTests
         await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => bridge.DisposeAsync().AsTask()));
     }
 
+    [Fact]
+    public async Task SessionHandle_queues_prompts_while_busy_auto_drains_on_turn_completion_and_supports_interrupt_and_prompt()
+    {
+        var adapter = new AntigravityAdapter();
+
+        using var agentToHostPipe = new AnonymousPipeServerStream(PipeDirection.Out);
+        using var hostReadFromAgent = new AnonymousPipeClientStream(PipeDirection.In, agentToHostPipe.ClientSafePipeHandle);
+        using var hostToAgentPipe = new AnonymousPipeServerStream(PipeDirection.Out);
+        using var agentReadFromHost = new AnonymousPipeClientStream(PipeDirection.In, hostToAgentPipe.ClientSafePipeHandle);
+
+        await using var handle = await adapter.StartSessionFromStreamsAsync(
+            new AcpSessionConfig
+            {
+                Provider = AgentProviderKind.Antigravity,
+                WorkingDirectory = Path.GetTempPath(),
+                SessionId = "agy-queue-test"
+            },
+            hostReadFromAgent,
+            hostToAgentPipe);
+
+        using var agentReader = new StreamReader(agentReadFromHost, Encoding.UTF8);
+        await using var agentWriter = new StreamWriter(agentToHostPipe, new UTF8Encoding(false)) { AutoFlush = true };
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        Assert.False(handle.IsTurnActive);
+
+        // 1. Enqueue while idle dispatches immediately and returns null
+        var firstQueued = await handle.EnqueuePromptAsync("Turn 1 prompt", cts.Token);
+        Assert.Null(firstQueued);
+        Assert.True(handle.IsTurnActive);
+
+        var line1 = await agentReader.ReadLineAsync(cts.Token);
+        Assert.NotNull(line1);
+        Assert.Contains("Turn 1 prompt", line1);
+
+        // 2. Enqueue while busy appends to FIFO queue and returns item metadata
+        var q1 = await handle.EnqueuePromptAsync("Turn 2 prompt (will remove)", cts.Token);
+        var q2 = await handle.EnqueuePromptAsync("Turn 2 prompt (kept)", cts.Token);
+        var q3 = await handle.EnqueuePromptAsync("Turn 3 prompt", cts.Token);
+
+        Assert.NotNull(q1);
+        Assert.NotNull(q2);
+        Assert.NotNull(q3);
+        Assert.Equal(3, handle.GetQueuedPrompts().Count);
+
+        // 3. Remove q1 before Turn 1 finishes
+        var removed = await handle.RemoveQueuedPromptAsync(q1!.QueueItemId, cts.Token);
+        Assert.True(removed);
+        Assert.Equal(2, handle.GetQueuedPrompts().Count);
+        Assert.Equal("Turn 2 prompt (kept)", handle.GetQueuedPrompts()[0].Prompt);
+
+        // 4. Complete Turn 1 -> q2 should auto-drain immediately
+        await agentWriter.WriteLineAsync("{\"type\":\"result\",\"is_error\":false}");
+
+        var line2 = await agentReader.ReadLineAsync(cts.Token);
+        Assert.NotNull(line2);
+        Assert.Contains("Turn 2 prompt (kept)", line2);
+        Assert.Single(handle.GetQueuedPrompts());
+        Assert.True(handle.IsTurnActive);
+
+        // 5. While Turn 2 is active, call InterruptAndSendPromptAsync -> sends interrupt control frame + new prompt immediately, keeping q3 for after!
+        var interruptTask = handle.InterruptAndSendPromptAsync("Urgent interrupt prompt", cts.Token);
+
+        var cancelLine = await agentReader.ReadLineAsync(cts.Token);
+        Assert.NotNull(cancelLine);
+        Assert.Contains("\"subtype\":\"interrupt\"", cancelLine);
+
+        // Agent acknowledges interrupt with result frame
+        await agentWriter.WriteLineAsync("{\"type\":\"result\",\"is_error\":false}");
+        await interruptTask;
+
+        var urgentLine = await agentReader.ReadLineAsync(cts.Token);
+        Assert.NotNull(urgentLine);
+        Assert.Contains("Urgent interrupt prompt", urgentLine);
+        Assert.Single(handle.GetQueuedPrompts());
+
+        // 6. Complete Urgent turn -> q3 auto-drains!
+        await agentWriter.WriteLineAsync("{\"type\":\"result\",\"is_error\":false}");
+
+        var line3 = await agentReader.ReadLineAsync(cts.Token);
+        Assert.NotNull(line3);
+        Assert.Contains("Turn 3 prompt", line3);
+        Assert.Empty(handle.GetQueuedPrompts());
+
+        // 7. Complete Turn 3 -> session returns to idle
+        await agentWriter.WriteLineAsync("{\"type\":\"result\",\"is_error\":false}");
+
+        var observedQueueEvents = 0;
+        var observedCompletedTurns = 0;
+        await foreach (var ev in handle.ReadEventsAsync(cts.Token))
+        {
+            if (ev is AcpPromptQueueUpdatedEvent)
+            {
+                observedQueueEvents++;
+            }
+            else if (ev is AcpTurnCompletedEvent)
+            {
+                observedCompletedTurns++;
+                if (observedCompletedTurns >= 4)
+                {
+                    break;
+                }
+            }
+        }
+
+        Assert.True(observedQueueEvents >= 5);
+        for (var i = 0; i < 20 && handle.IsTurnActive; i++)
+        {
+            await Task.Delay(10, cts.Token);
+        }
+        Assert.False(handle.IsTurnActive);
+    }
+
     private sealed class FakeInMemoryProviderAdapter : IAcpProviderAdapter
     {
         public AgentProviderKind Provider => AgentProviderKind.Antigravity;
@@ -906,7 +1019,7 @@ public sealed class AdapterAndBridgeTests
             public override Task InitializeAsync(CancellationToken cancellationToken = default)
                 => Task.CompletedTask;
 
-            public override Task SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+            protected override Task SendPromptCoreAsync(string prompt, CancellationToken cancellationToken = default)
             {
                 var now = DateTimeOffset.UtcNow;
                 PublishEvent(new AcpAssistantTextDeltaEvent(Provider, SessionId, now, $"Bridged response to: {prompt}"));

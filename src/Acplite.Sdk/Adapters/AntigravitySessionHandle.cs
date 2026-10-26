@@ -7,6 +7,8 @@ namespace Acplite.Sdk.Adapters;
 
 internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
 {
+    private long _controlRequestCounter;
+
     public AntigravitySessionHandle(
         AcpSessionConfig config,
         string sessionId,
@@ -31,7 +33,7 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
         return Task.CompletedTask;
     }
 
-    public override async Task SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+    protected override async Task SendPromptCoreAsync(string prompt, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
 
@@ -56,7 +58,15 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
             return false;
         }
 
-        await SendPromptAsync(steeringPrompt, cancellationToken).ConfigureAwait(false);
+        if (IsTurnActive)
+        {
+            await SendPromptCoreAsync(steeringPrompt, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await SendPromptAsync(steeringPrompt, cancellationToken).ConfigureAwait(false);
+        }
+
         return true;
     }
 
@@ -68,10 +78,39 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
         => Task.CompletedTask;
 
     public override Task SetModelAsync(string modelId, CancellationToken cancellationToken = default)
-        => Task.CompletedTask;
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
+        return SendControlRequestAsync(
+            "model",
+            new Dictionary<string, string?>
+            {
+                ["subtype"] = "set_model",
+                ["model"] = modelId
+            },
+            cancellationToken);
+    }
 
     public override Task CancelTurnAsync(CancellationToken cancellationToken = default)
-        => Task.CompletedTask;
+        => SendControlRequestAsync(
+            "cancel",
+            new Dictionary<string, string?> { ["subtype"] = "interrupt" },
+            cancellationToken);
+
+    private async Task SendControlRequestAsync(
+        string prefix,
+        Dictionary<string, string?> requestFields,
+        CancellationToken cancellationToken)
+    {
+        var reqId = $"{prefix}_{Interlocked.Increment(ref _controlRequestCounter)}";
+        var frame = new ClaudeControlRequestFrame
+        {
+            RequestId = reqId,
+            Request = requestFields
+        };
+
+        var json = JsonSerializer.Serialize(frame, AcpJsonContext.Default.ClaudeControlRequestFrame);
+        await Transport.SendRawJsonLineAsync(json, cancellationToken).ConfigureAwait(false);
+    }
 
     private Task HandleRawFrameAsync(JsonElement root, CancellationToken cancellationToken)
     {

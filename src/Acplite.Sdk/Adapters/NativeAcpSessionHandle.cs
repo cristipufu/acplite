@@ -40,7 +40,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
             w.WritePropertyName("clientInfo");
             w.WriteStartObject();
             w.WriteString("name", "acplite");
-            w.WriteString("version", "0.1.0");
+            w.WriteString("version", "0.1.1");
             w.WriteEndObject();
             w.WriteEndObject();
         });
@@ -89,7 +89,7 @@ internal sealed class NativeAcpSessionHandle : AcpSessionHandleBase
             Config.WorkingDirectory));
     }
 
-    public override Task SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+    protected override Task SendPromptCoreAsync(string prompt, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
 

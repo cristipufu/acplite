@@ -117,6 +117,14 @@ public sealed record AcpSessionConfig
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(20);
 }
 
+/// <summary>
+/// Represents a user prompt queued for execution on a subsequent turn once the active turn finishes.
+/// </summary>
+public sealed record AcpQueuedPromptItem(
+    string QueueItemId,
+    string Prompt,
+    DateTimeOffset EnqueuedAt);
+
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
 [JsonDerivedType(typeof(AcpSessionStartedEvent), "session_started")]
 [JsonDerivedType(typeof(AcpAssistantTextDeltaEvent), "assistant_text_delta")]
@@ -127,6 +135,7 @@ public sealed record AcpSessionConfig
 [JsonDerivedType(typeof(AcpUsageSnapshotEvent), "usage_snapshot")]
 [JsonDerivedType(typeof(AcpTurnCompletedEvent), "turn_completed")]
 [JsonDerivedType(typeof(AcpInterruptionEvent), "interruption")]
+[JsonDerivedType(typeof(AcpPromptQueueUpdatedEvent), "prompt_queue_updated")]
 [JsonDerivedType(typeof(AcpTranscriptHistoryEntryEvent), "transcript_history_entry")]
 public abstract record AcpEvent(
     AgentProviderKind Provider,
@@ -248,6 +257,12 @@ public sealed record AcpInterruptionEvent(
     string SessionId,
     DateTimeOffset Timestamp,
     AcpInterruptionClassification Classification) : AcpEvent(Provider, SessionId, Timestamp);
+
+public sealed record AcpPromptQueueUpdatedEvent(
+    AgentProviderKind Provider,
+    string SessionId,
+    DateTimeOffset Timestamp,
+    IReadOnlyList<AcpQueuedPromptItem> QueuedPrompts) : AcpEvent(Provider, SessionId, Timestamp);
 
 public sealed record AcpTranscriptHistoryEntryEvent(
     AgentProviderKind Provider,

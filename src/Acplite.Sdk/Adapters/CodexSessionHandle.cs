@@ -36,7 +36,7 @@ internal sealed class CodexSessionHandle : AcpSessionHandleBase
             w.WriteStartObject();
             w.WriteString("name", "acplite");
             w.WriteString("title", "Acplite.Sdk");
-            w.WriteString("version", "0.1.0");
+            w.WriteString("version", "0.1.1");
             w.WriteEndObject();
             w.WriteEndObject();
         });
@@ -81,7 +81,7 @@ internal sealed class CodexSessionHandle : AcpSessionHandleBase
             Config.WorkingDirectory));
     }
 
-    public override async Task SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+    protected override async Task SendPromptCoreAsync(string prompt, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
 

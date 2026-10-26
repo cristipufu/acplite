@@ -31,7 +31,7 @@ internal sealed class ClaudeSessionHandle : AcpSessionHandleBase
             cancellationToken).ConfigureAwait(false);
     }
 
-    public override async Task SendPromptAsync(string prompt, CancellationToken cancellationToken = default)
+    protected override async Task SendPromptCoreAsync(string prompt, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
 
@@ -56,7 +56,15 @@ internal sealed class ClaudeSessionHandle : AcpSessionHandleBase
             return false;
         }
 
-        await SendPromptAsync(steeringPrompt, cancellationToken).ConfigureAwait(false);
+        if (IsTurnActive)
+        {
+            await SendPromptCoreAsync(steeringPrompt, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await SendPromptAsync(steeringPrompt, cancellationToken).ConfigureAwait(false);
+        }
+
         return true;
     }
 

@@ -155,9 +155,12 @@ _ = Task.Run(async () =>
     }
 });
 
-// 4. Send a prompt and steer mid-turn while the agent is working
+// 4. Send a prompt, steer mid-turn, queue next-turn messages, or interrupt
 await session.SendPromptAsync("Inspect the failing tests and fix the race condition.", ct);
 await session.SteerAsync("Use SemaphoreSlim instead of lock.", ct);
+await session.EnqueuePromptAsync("After fixing the tests, update the XML docs.", ct);
+// Or interrupt the active turn and immediately start a new turn:
+// await session.InterruptAndSendPromptAsync("Stop and check the build config first.", ct);
 ```
 
 ---
