@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <PackageId>Acplite.Pty</PackageId>
+    <PackageTags>acp;acplite;pty;conpty;pseudoterminal;terminal;claude;codex;grok;antigravity;nativeaot;</PackageTags>
+    <Description>Cross-platform pseudo-terminal (POSIX PTY and Windows ConPTY) wrapper, TUI prompt inspector, local IPC control channel, and shell hook installer for Acplite.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IsPackable>true</IsPackable>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="True" PackagePath="\" />
+    <InternalsVisibleTo Include="Acplite.Sdk" />
+    <InternalsVisibleTo Include="Acplite.Client" />
+    <InternalsVisibleTo Include="Acplite.Tests" />
+  </ItemGroup>
+
+</Project>

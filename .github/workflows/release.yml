@@ -133,7 +133,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for project in src/Acplite.Sdk src/Acplite.Client; do
+          for project in src/Acplite.Pty src/Acplite.Sdk src/Acplite.Client; do
             dotnet pack "$project" -c Release -p:Version=${{ steps.version.outputs.version }} -o packages
           done
           ls -la packages
@@ -152,7 +152,7 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           pending=()
-          for id in Acplite Acplite.Sdk; do
+          for id in Acplite Acplite.Sdk Acplite.Pty; do
             lower=$(tr '[:upper:]' '[:lower:]' <<<"$id")
             if curl -sS "https://api.nuget.org/v3-flatcontainer/$lower/index.json" | grep -qF "\"$version\""; then
               echo "$id $version is already on nuget.org, skipping"

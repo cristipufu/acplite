@@ -10,6 +10,6 @@
     <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://github.com/cristipufu/acplite</PackageProjectUrl>
     <RepositoryUrl>https://github.com/cristipufu/acplite</RepositoryUrl>
-    <Version>0.1.4</Version>
+    <Version>0.2.0</Version>
   </PropertyGroup>
 </Project>

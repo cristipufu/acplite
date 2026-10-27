@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using Acplite.Sdk.Adapters;
 using Acplite.Sdk.Protocol;
 using Acplite.Sdk.Runtime;
@@ -14,12 +15,16 @@ namespace Acplite.Sdk;
 public sealed class AcpliteRuntime : IAsyncDisposable
 {
     private readonly Dictionary<AgentProviderKind, IAcpProviderAdapter> _adapters;
+    private readonly IAcpExternalSessionBridge? _externalBridge;
     private readonly ConcurrentDictionary<IAcpSessionHandle, byte> _activeHandles = new(ReferenceEqualityComparer.Instance);
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private int _isDisposed;
 
-    public AcpliteRuntime(IEnumerable<IAcpProviderAdapter>? customAdapters = null)
+    public AcpliteRuntime(
+        IEnumerable<IAcpProviderAdapter>? customAdapters = null,
+        IAcpExternalSessionBridge? externalSessionBridge = null)
     {
+        _externalBridge = externalSessionBridge;
         _adapters = new Dictionary<AgentProviderKind, IAcpProviderAdapter>
         {
             [AgentProviderKind.Claude] = new ClaudeCodeAdapter(),
@@ -73,10 +78,27 @@ public sealed class AcpliteRuntime : IAsyncDisposable
         var tasks = targets.Select(a => a.DiscoverSessionsAsync(maxSessionsPerProvider, cancellationToken));
         var lists = await Task.WhenAll(tasks).ConfigureAwait(false);
 
-        return lists
+        var ordered = lists
             .SelectMany(static x => x)
             .OrderByDescending(static s => s.UpdatedAt)
             .ToList();
+
+        if (_externalBridge is null || ordered.Count == 0)
+        {
+            return ordered;
+        }
+
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            var s = ordered[i];
+            if (!s.IsActive &&
+                await _externalBridge.HasActiveSessionAsync(s.Provider, s.SessionId, s.WorkingDirectory, cancellationToken).ConfigureAwait(false))
+            {
+                ordered[i] = s with { IsActive = true };
+            }
+        }
+
+        return ordered;
     }
 
     public async Task<AcpDiscoveredSession?> FindSessionByIdAsync(
@@ -103,10 +125,158 @@ public sealed class AcpliteRuntime : IAsyncDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _isDisposed) != 0, this);
 
         var adapter = GetAdapter(session.Provider);
-        await foreach (var ev in adapter.TailSessionTranscriptAsync(session, includeHistory, followLive, cancellationToken).ConfigureAwait(false))
+        if (!followLive || _externalBridge is null)
         {
-            yield return ev;
+            await foreach (var ev in adapter.TailSessionTranscriptAsync(session, includeHistory, followLive, cancellationToken).ConfigureAwait(false))
+            {
+                yield return ev;
+            }
+            yield break;
         }
+
+        var merged = Channel.CreateUnbounded<AcpEvent>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false
+        });
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var transcriptTask = PumpTranscriptToChannelAsync(adapter, session, includeHistory, merged.Writer, linkedCts.Token);
+        var externalTask = PumpExternalToChannelAsync(_externalBridge, session, merged.Writer, linkedCts.Token);
+        var completionTask = CompleteWhenBothDoneAsync(transcriptTask, externalTask, merged.Writer);
+
+        try
+        {
+            await foreach (var ev in merged.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return ev;
+            }
+        }
+        finally
+        {
+            await linkedCts.CancelAsync().ConfigureAwait(false);
+            try { await completionTask.WaitAsync(TimeSpan.FromMilliseconds(150)).ConfigureAwait(false); } catch { }
+        }
+    }
+
+    private static async Task CompleteWhenBothDoneAsync(
+        Task transcriptTask,
+        Task externalTask,
+        ChannelWriter<AcpEvent> writer)
+    {
+        try
+        {
+            await Task.WhenAll(transcriptTask, externalTask).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Individual pumps handle cancellation and errors
+        }
+        finally
+        {
+            writer.TryComplete();
+        }
+    }
+
+    private static async Task PumpTranscriptToChannelAsync(
+        IAcpProviderAdapter adapter,
+        AcpDiscoveredSession session,
+        bool includeHistory,
+        ChannelWriter<AcpEvent> writer,
+        CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        try
+        {
+            await foreach (var ev in adapter.TailSessionTranscriptAsync(session, includeHistory, followLive: true, cancellationToken).ConfigureAwait(false))
+            {
+                writer.TryWrite(ev);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal cancellation
+        }
+        catch
+        {
+            // Keep external channel alive if transcript file is not created yet
+        }
+    }
+
+    private static async Task PumpExternalToChannelAsync(
+        IAcpExternalSessionBridge bridge,
+        AcpDiscoveredSession session,
+        ChannelWriter<AcpEvent> writer,
+        CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        try
+        {
+            await foreach (var ev in bridge.MonitorSessionEventsAsync(session, cancellationToken).ConfigureAwait(false))
+            {
+                writer.TryWrite(ev);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal cancellation
+        }
+    }
+
+    public async Task<PtyAttachedSessionHandle?> TryAttachToExternalSessionAsync(
+        AcpSessionConfig config,
+        AcpDiscoveredSession? discoveredSession = null,
+        bool enableInternalTranscriptTail = true,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _isDisposed) != 0, this);
+
+        if (_externalBridge is null)
+        {
+            return null;
+        }
+
+        if (discoveredSession is null && !string.IsNullOrWhiteSpace(config.SessionId))
+        {
+            try
+            {
+                discoveredSession = await FindSessionByIdAsync(config.SessionId!, config.Provider, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Ignore discovery failure
+            }
+        }
+
+        var resolvedSessionId = !string.IsNullOrWhiteSpace(config.SessionId)
+            ? config.SessionId!
+            : Guid.NewGuid().ToString("N");
+
+        var channel = await _externalBridge.TryConnectChannelAsync(
+            config.Provider,
+            resolvedSessionId,
+            config.WorkingDirectory,
+            discoveredSession?.TranscriptPath,
+            cancellationToken).ConfigureAwait(false);
+
+        if (channel is null)
+        {
+            return null;
+        }
+
+        var adapter = GetAdapter(config.Provider);
+        var handle = new PtyAttachedSessionHandle(
+            config.Provider,
+            resolvedSessionId,
+            config.WorkingDirectory,
+            channel,
+            adapter,
+            discoveredSession,
+            enableInternalTranscriptTail);
+
+        await RegisterActiveHandleAsync(handle).ConfigureAwait(false);
+        return handle;
     }
 
     public async Task<IAcpSessionHandle> StartSessionAsync(
@@ -116,13 +286,31 @@ public sealed class AcpliteRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(config);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _isDisposed) != 0, this);
 
+        if (config.AttachToPtyIfAvailable && (config.ResumeExisting || !string.IsNullOrWhiteSpace(config.SessionId)))
+        {
+            var ptyHandle = await TryAttachToExternalSessionAsync(config, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (ptyHandle is not null)
+            {
+                return ptyHandle;
+            }
+        }
+
         var adapter = GetAdapter(config.Provider);
         var handle = await adapter.StartSessionAsync(config, cancellationToken).ConfigureAwait(false);
+        await RegisterActiveHandleAsync(handle).ConfigureAwait(false);
+        return handle;
+    }
 
+    private async Task RegisterActiveHandleAsync(IAcpSessionHandle handle)
+    {
         _activeHandles[handle] = 0;
         if (handle is AcpSessionHandleBase baseHandle)
         {
             baseHandle.OnDisposed = h => _activeHandles.TryRemove(h, out _);
+        }
+        else if (handle is PtyAttachedSessionHandle ptyHandle)
+        {
+            ptyHandle.OnDisposed = h => _activeHandles.TryRemove(h, out _);
         }
 
         if (Volatile.Read(ref _isDisposed) != 0)
@@ -131,8 +319,6 @@ public sealed class AcpliteRuntime : IAsyncDisposable
             await handle.DisposeAsync().ConfigureAwait(false);
             throw new ObjectDisposedException(nameof(AcpliteRuntime));
         }
-
-        return handle;
     }
 
     public async Task<IReadOnlyList<AcpUsageSnapshot>> ProbeUsageAsync(

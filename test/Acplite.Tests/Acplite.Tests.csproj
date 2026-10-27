@@ -13,6 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Acplite.Pty\Acplite.Pty.csproj" />
     <ProjectReference Include="..\..\src\Acplite.Sdk\Acplite.Sdk.csproj" />
     <ProjectReference Include="..\..\src\Acplite.Client\Acplite.Client.csproj" />
   </ItemGroup>

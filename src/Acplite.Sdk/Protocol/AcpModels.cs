@@ -111,6 +111,7 @@ public sealed record AcpSessionConfig
     public string? ReasoningEffort { get; init; }
     public string? PermissionMode { get; init; }
     public bool AutoApproveTools { get; init; }
+    public bool AttachToPtyIfAvailable { get; init; } = true;
     public string? BinaryPathOverride { get; init; }
     public IReadOnlyList<string>? ExtraArguments { get; init; }
     public IReadOnlyDictionary<string, string>? ExtraEnvironment { get; init; }

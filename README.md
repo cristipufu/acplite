@@ -109,6 +109,10 @@ acplite run agy "Add unit tests for the new parser" --session <conversation-id>
 
 # 5. Check account rate-limit & quota windows
 acplite usage
+
+# 6. Install transparent PTY shell hooks for Ghostty / iTerm2 / Windows Terminal
+acplite hooks install
+acplite pty --list
 ```
 
 ---
@@ -236,6 +240,7 @@ flowchart LR
 | --- | --- |
 | [Acplite](https://www.nuget.org/packages/Acplite/) | The `acplite` command-line tool and `stdio` ACP server bridge. |
 | [Acplite.Sdk](https://www.nuget.org/packages/Acplite.Sdk/) | `AcpliteRuntime` and native C# ACP adapters for `claude`, `codex`, `grok`, and `agy`. |
+| [Acplite.Pty](https://www.nuget.org/packages/Acplite.Pty/) | Cross-platform pseudo-terminal (POSIX PTY & Windows ConPTY) wrapper, TUI prompt inspector, local IPC control channel, and shell hook installer. |
 
 ---
 
