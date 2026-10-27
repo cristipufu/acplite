@@ -226,6 +226,7 @@ public static class PtySessionRunner
             return;
         }
 
+        var idleDelayMs = 4;
         while (!cancellationToken.IsCancellationRequested)
         {
             var bytesRead = PollAndReadStdinNonBlocking(buffer);
@@ -236,10 +237,15 @@ public static class PtySessionRunner
 
             if (bytesRead == 0)
             {
-                await Task.Delay(12, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(idleDelayMs, cancellationToken).ConfigureAwait(false);
+                if (idleDelayMs < 32)
+                {
+                    idleDelayMs *= 2;
+                }
                 continue;
             }
 
+            idleDelayMs = 4;
             await HandleLocalStdinBytesAsync(buffer.AsMemory(0, bytesRead), inspector, controlServer, cancellationToken).ConfigureAwait(false);
         }
     }

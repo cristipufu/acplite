@@ -16,8 +16,35 @@ public static class ProcessTreeStopper
     [
         "CLAUDECODE",
         "CLAUDE_CODE_ENTRYPOINT",
-        "CLAUDE_CODE_SSE_PORT"
+        "CLAUDE_CODE_SSE_PORT",
+        "MallocStackLogging",
+        "MallocStackLoggingNoCompact",
+        "MallocScribble"
     ];
+
+    static ProcessTreeStopper()
+    {
+        SanitizeCurrentProcessEnvironment();
+    }
+
+    public static void SanitizeCurrentProcessEnvironment()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return;
+        }
+
+        try
+        {
+            Environment.SetEnvironmentVariable("MallocStackLogging", null);
+            Environment.SetEnvironmentVariable("MallocStackLoggingNoCompact", null);
+            Environment.SetEnvironmentVariable("MallocScribble", null);
+        }
+        catch
+        {
+            // Ignore if environment is read-only
+        }
+    }
 
     private static readonly string[] WindowsExecutableExtensions = [".exe", ".cmd", ".bat", ""];
     private static readonly string[] UnixExecutableExtensions = [""];
@@ -280,6 +307,11 @@ public static class ProcessTreeStopper
         foreach (var arg in arguments)
         {
             psi.ArgumentList.Add(arg);
+        }
+
+        foreach (var key in StrippedNestedVariables)
+        {
+            psi.Environment.Remove(key);
         }
 
         return psi;

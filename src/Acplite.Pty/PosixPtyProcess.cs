@@ -444,6 +444,10 @@ internal sealed class PosixPtyProcess : IPtyProcess
             }
         }
 
+        dict.Remove("MallocStackLogging");
+        dict.Remove("MallocStackLoggingNoCompact");
+        dict.Remove("MallocScribble");
+
         if (!dict.ContainsKey("TERM") || string.IsNullOrWhiteSpace(dict["TERM"]) || dict["TERM"] == "dumb")
         {
             dict["TERM"] = "xterm-256color";
@@ -586,6 +590,7 @@ internal sealed class PosixPtyProcess : IPtyProcess
                 return 0;
             }
 
+            var idleDelayMs = 4;
             while (!cancellationToken.IsCancellationRequested)
             {
                 var status = TryReadNonBlocking(owner, buffer.Span, out var bytesRead);
@@ -594,7 +599,11 @@ internal sealed class PosixPtyProcess : IPtyProcess
                     return bytesRead;
                 }
 
-                await Task.Delay(8, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(idleDelayMs, cancellationToken).ConfigureAwait(false);
+                if (idleDelayMs < 32)
+                {
+                    idleDelayMs *= 2;
+                }
             }
 
             cancellationToken.ThrowIfCancellationRequested();

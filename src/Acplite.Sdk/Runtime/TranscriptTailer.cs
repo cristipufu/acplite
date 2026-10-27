@@ -18,7 +18,7 @@ public static class TranscriptTailer
     /// Pass <see langword="null"/> to read from byte 0 regardless of file size.
     /// </summary>
     public const long DefaultMaxInitialBytes = 512 * 1024;
-    private static readonly TimeSpan FallbackPollInterval = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan FallbackPollInterval = TimeSpan.FromMilliseconds(500);
 
     public static async IAsyncEnumerable<string> TailLinesAsync(
         string filePath,
@@ -92,27 +92,24 @@ public static class TranscriptTailer
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                pollCts.CancelAfter(FallbackPollInterval);
-
-                try
+                if (!wakeChannel.Reader.TryRead(out _))
                 {
-                    await wakeChannel.Reader.ReadAsync(pollCts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    // Periodic fallback check in case OS coalesced FileSystemWatcher notifications
-                }
-
-                if (!File.Exists(filePath))
-                {
-                    continue;
+                    var waitTask = wakeChannel.Reader.WaitToReadAsync(cancellationToken).AsTask();
+                    var delayTask = Task.Delay(FallbackPollInterval, cancellationToken);
+                    await Task.WhenAny(waitTask, delayTask).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _ = wakeChannel.Reader.TryRead(out _);
                 }
 
                 long currentLen;
                 try
                 {
-                    currentLen = new FileInfo(filePath).Length;
+                    var fi = new FileInfo(filePath);
+                    if (!fi.Exists)
+                    {
+                        continue;
+                    }
+                    currentLen = fi.Length;
                 }
                 catch (IOException)
                 {

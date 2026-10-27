@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using Acplite.Sdk.Protocol;
 using Acplite.Sdk.Runtime;
@@ -11,6 +12,17 @@ namespace Acplite.Sdk.Adapters;
 /// </summary>
 public abstract class ProviderAdapterBase : IAcpProviderAdapter
 {
+    private const int MaxCachedSessionFiles = 256;
+    private static readonly TimeSpan ActiveSessionWindow = TimeSpan.FromMinutes(2);
+
+    private readonly ConcurrentDictionary<string, AcpProviderDescriptor> _descriptorCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, CachedSessionFileEntry> _sessionFileCache = new(StringComparer.Ordinal);
+
+    private readonly record struct CachedSessionFileEntry(
+        long LastWriteTicks,
+        long Length,
+        AcpDiscoveredSession? Session);
+
     public abstract AgentProviderKind Provider { get; }
     public abstract string ShortId { get; }
     public abstract string DisplayName { get; }
@@ -33,19 +45,26 @@ public abstract class ProviderAdapterBase : IAcpProviderAdapter
         string? binaryPathOverride = null,
         CancellationToken cancellationToken = default)
     {
+        var binaryName = binaryPathOverride ?? DefaultBinaryName;
         var resolved = ProcessTreeStopper.ResolveBinaryPath(
-            binaryPathOverride ?? DefaultBinaryName,
+            binaryName,
             GetExtraBinaryCandidates());
+
+        var cacheKey = $"{binaryName}|{resolved ?? string.Empty}";
+        if (_descriptorCache.TryGetValue(cacheKey, out var cached))
+        {
+            return cached;
+        }
 
         var version = resolved is not null
             ? await ProcessTreeStopper.ProbeVersionAsync(resolved, cancellationToken).ConfigureAwait(false)
             : null;
 
-        return new AcpProviderDescriptor(
+        var descriptor = new AcpProviderDescriptor(
             Provider: Provider,
             ShortId: ShortId,
             DisplayName: DisplayName,
-            BinaryName: binaryPathOverride ?? DefaultBinaryName,
+            BinaryName: binaryName,
             IsInstalled: resolved is not null,
             ResolvedBinaryPath: resolved,
             Version: version,
@@ -53,6 +72,42 @@ public abstract class ProviderAdapterBase : IAcpProviderAdapter
             SupportsLiveSteering: SupportsLiveSteering,
             SupportsSessionDiscovery: SupportsSessionDiscovery,
             SupportsUsageProbe: SupportsUsageProbe);
+
+        _descriptorCache[cacheKey] = descriptor;
+        return descriptor;
+    }
+
+    protected async ValueTask<AcpDiscoveredSession?> GetOrParseSessionFileAsync(
+        FileInfo file,
+        Func<FileInfo, CancellationToken, Task<AcpDiscoveredSession?>> parser,
+        CancellationToken cancellationToken)
+    {
+        var path = file.FullName;
+        var writeTicks = file.LastWriteTimeUtc.Ticks;
+        var length = file.Length;
+
+        if (_sessionFileCache.TryGetValue(path, out var entry) &&
+            entry.LastWriteTicks == writeTicks &&
+            entry.Length == length)
+        {
+            if (entry.Session is null)
+            {
+                return null;
+            }
+
+            var isActiveNow = (DateTime.UtcNow - file.LastWriteTimeUtc) < ActiveSessionWindow;
+            return entry.Session.IsActive == isActiveNow
+                ? entry.Session
+                : entry.Session with { IsActive = isActiveNow };
+        }
+
+        var parsed = await parser(file, cancellationToken).ConfigureAwait(false);
+        if (_sessionFileCache.Count >= MaxCachedSessionFiles)
+        {
+            _sessionFileCache.Clear();
+        }
+        _sessionFileCache[path] = new CachedSessionFileEntry(writeTicks, length, parsed);
+        return parsed;
     }
 
     public abstract Task<IReadOnlyList<AcpDiscoveredSession>> DiscoverSessionsAsync(

@@ -38,7 +38,10 @@ public sealed class ClaudeCodeAdapter : ProviderAdapterBase
         foreach (var file in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var parsed = await ClaudeTranscriptParser.TryParseSessionFileAsync(file, cancellationToken).ConfigureAwait(false);
+            var parsed = await GetOrParseSessionFileAsync(
+                file,
+                ClaudeTranscriptParser.TryParseSessionFileAsync,
+                cancellationToken).ConfigureAwait(false);
             if (parsed is not null)
             {
                 results.Add(parsed);

@@ -73,7 +73,10 @@ public sealed class AntigravityAdapter : ProviderAdapterBase
         foreach (var (convId, transcriptFile) in ordered)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var parsed = await AntigravityTranscriptParser.TryParseSessionAsync(convId, transcriptFile, cancellationToken).ConfigureAwait(false);
+            var parsed = await GetOrParseSessionFileAsync(
+                transcriptFile,
+                (f, ct) => AntigravityTranscriptParser.TryParseSessionAsync(convId, f, ct),
+                cancellationToken).ConfigureAwait(false);
             if (parsed is not null)
             {
                 results.Add(parsed);

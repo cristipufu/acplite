@@ -9,6 +9,14 @@ namespace Acplite.Pty;
 /// </summary>
 public static class PtySessionRegistry
 {
+    private const long CacheTtlMilliseconds = 300;
+    private static volatile CachedSessionsSnapshot? _cachedSnapshot;
+
+    private sealed record CachedSessionsSnapshot(
+        string DirectoryPath,
+        long TimestampMs,
+        IReadOnlyList<PtySessionMetadata> Sessions);
+
     public static string GetRegistryDirectory(string? customDirectory = null)
     {
         if (!string.IsNullOrWhiteSpace(customDirectory))
@@ -62,12 +70,14 @@ public static class PtySessionRegistry
 
         await File.WriteAllTextAsync(tempPath, json, cancellationToken).ConfigureAwait(false);
         File.Move(tempPath, filePath, overwrite: true);
+        _cachedSnapshot = null;
     }
 
     public static void RemoveSession(int pid, string? registryDirectory = null)
     {
         try
         {
+            _cachedSnapshot = null;
             var filePath = GetMetadataFilePath(pid, registryDirectory);
             if (File.Exists(filePath))
             {
@@ -85,8 +95,18 @@ public static class PtySessionRegistry
         CancellationToken cancellationToken = default)
     {
         var dir = GetRegistryDirectory(registryDirectory);
+        var nowMs = Environment.TickCount64;
+        var cached = _cachedSnapshot;
+        if (cached is not null &&
+            string.Equals(cached.DirectoryPath, dir, StringComparison.Ordinal) &&
+            (nowMs - cached.TimestampMs) < CacheTtlMilliseconds)
+        {
+            return cached.Sessions;
+        }
+
         if (!Directory.Exists(dir))
         {
+            _cachedSnapshot = new CachedSessionsSnapshot(dir, nowMs, []);
             return [];
         }
 
@@ -132,9 +152,11 @@ public static class PtySessionRegistry
             return [];
         }
 
-        return active
+        var sorted = active
             .OrderByDescending(static m => m.LastActiveAt)
             .ToList();
+        _cachedSnapshot = new CachedSessionsSnapshot(dir, Environment.TickCount64, sorted);
+        return sorted;
     }
 
     public static async Task<PtySessionMetadata?> FindMatchingSessionAsync(

@@ -38,46 +38,55 @@ public sealed class GrokAdapter : ProviderAdapterBase
         foreach (var file in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var sessionId = Path.GetFileNameWithoutExtension(file.Name);
-            string? title = null;
-            var msgCount = 0;
-
-            try
+            var parsed = await GetOrParseSessionFileAsync(file, ParseGrokSessionFileAsync, cancellationToken).ConfigureAwait(false);
+            if (parsed is not null)
             {
-                await using var fs = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new StreamReader(fs, Encoding.UTF8);
-                string? line;
-                while (msgCount < 20 && (line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false)) is not null)
-                {
-                    if (string.IsNullOrWhiteSpace(line) || line[0] != '{') continue;
-                    using var doc = JsonDocument.Parse(line);
-                    msgCount++;
-                    title ??= doc.RootElement.GetOptionalString("text");
-                }
+                results.Add(parsed);
             }
-            catch
-            {
-                // Ignore unreadable file
-            }
-
-            var displayTitle = !string.IsNullOrWhiteSpace(title)
-                ? TextSanitizer.TruncateSingleLine(title)
-                : $"Grok session {sessionId[..Math.Min(8, sessionId.Length)]}";
-
-            results.Add(new AcpDiscoveredSession(
-                Provider: Provider,
-                SessionId: sessionId,
-                Title: displayTitle,
-                WorkingDirectory: null,
-                TranscriptPath: file.FullName,
-                UpdatedAt: new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero),
-                CreatedAt: new DateTimeOffset(file.CreationTimeUtc, TimeSpan.Zero),
-                Model: "grok-4",
-                IsActive: (DateTime.UtcNow - file.LastWriteTimeUtc) < TimeSpan.FromMinutes(2),
-                MessageCount: msgCount));
         }
 
         return results;
+    }
+
+    private async Task<AcpDiscoveredSession?> ParseGrokSessionFileAsync(FileInfo file, CancellationToken cancellationToken)
+    {
+        var sessionId = Path.GetFileNameWithoutExtension(file.Name);
+        string? title = null;
+        var msgCount = 0;
+
+        try
+        {
+            await using var fs = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(fs, Encoding.UTF8);
+            string? line;
+            while (msgCount < 20 && (line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false)) is not null)
+            {
+                if (string.IsNullOrWhiteSpace(line) || line[0] != '{') continue;
+                using var doc = JsonDocument.Parse(line);
+                msgCount++;
+                title ??= doc.RootElement.GetOptionalString("text");
+            }
+        }
+        catch
+        {
+            // Ignore unreadable file
+        }
+
+        var displayTitle = !string.IsNullOrWhiteSpace(title)
+            ? TextSanitizer.TruncateSingleLine(title)
+            : $"Grok session {sessionId[..Math.Min(8, sessionId.Length)]}";
+
+        return new AcpDiscoveredSession(
+            Provider: Provider,
+            SessionId: sessionId,
+            Title: displayTitle,
+            WorkingDirectory: null,
+            TranscriptPath: file.FullName,
+            UpdatedAt: new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero),
+            CreatedAt: new DateTimeOffset(file.CreationTimeUtc, TimeSpan.Zero),
+            Model: "grok-4",
+            IsActive: (DateTime.UtcNow - file.LastWriteTimeUtc) < TimeSpan.FromMinutes(2),
+            MessageCount: msgCount);
     }
 
     protected override IEnumerable<AcpEvent> ParseTranscriptLine(string sessionId, string line)
