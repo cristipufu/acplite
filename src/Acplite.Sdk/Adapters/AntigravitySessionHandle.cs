@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
 using Acplite.Sdk.Formatting;
@@ -8,6 +9,7 @@ namespace Acplite.Sdk.Adapters;
 
 internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
 {
+    private readonly ConcurrentDictionary<string, string> _pendingPermissionRequests = new(StringComparer.Ordinal);
     private long _controlRequestCounter;
 
     public AntigravitySessionHandle(
@@ -71,12 +73,43 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
         return true;
     }
 
-    public override Task RespondPermissionAsync(
+    public override async Task RespondPermissionAsync(
         string requestId,
         bool approved,
         string? selectedOptionId = null,
         CancellationToken cancellationToken = default)
-        => Task.CompletedTask;
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        _pendingPermissionRequests.TryRemove(requestId, out _);
+
+        var responseDict = new Dictionary<string, string?>
+        {
+            ["behavior"] = approved ? "allow" : "deny"
+        };
+
+        if (!approved)
+        {
+            responseDict["message"] = "Tool execution denied by user.";
+        }
+
+        var responseFrame = new ClaudeControlResponseFrame
+        {
+            Response = new ClaudeControlInnerResponse
+            {
+                Subtype = "success",
+                RequestId = requestId,
+                Response = responseDict
+            }
+        };
+
+        var json = JsonSerializer.Serialize(responseFrame, AcpJsonContext.Default.ClaudeControlResponseFrame);
+        await Transport.SendRawJsonLineAsync(json, cancellationToken).ConfigureAwait(false);
+    }
+
+    protected override void OnSessionFaulted(Exception exception)
+    {
+        _pendingPermissionRequests.Clear();
+    }
 
     public override Task SetModelAsync(string modelId, CancellationToken cancellationToken = default)
     {
@@ -113,7 +146,7 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
         await Transport.SendRawJsonLineAsync(json, cancellationToken).ConfigureAwait(false);
     }
 
-    private Task HandleRawFrameAsync(JsonElement root, CancellationToken cancellationToken)
+    private async Task HandleRawFrameAsync(JsonElement root, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         var incomingId = root.GetOptionalString("conversation_id") ?? root.GetOptionalString("session_id");
@@ -127,6 +160,7 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
         {
             case "PLANNER_RESPONSE":
             case "assistant":
+            case "step_update":
             {
                 var thinking = root.GetOptionalString("thinking");
                 if (!string.IsNullOrEmpty(thinking))
@@ -180,6 +214,12 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
                 break;
             }
 
+            case "control_request":
+            {
+                await HandleControlRequestFrameAsync(root, now, cancellationToken).ConfigureAwait(false);
+                break;
+            }
+
             case "stream_event":
             {
                 if (root.TryGetObject("event", out var ev) && ev.TryGetObject("delta", out var delta))
@@ -217,7 +257,43 @@ internal sealed class AntigravitySessionHandle : AcpSessionHandleBase
                 break;
             }
         }
+    }
 
-        return Task.CompletedTask;
+    private async Task HandleControlRequestFrameAsync(JsonElement root, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var reqId = root.GetOptionalString("request_id");
+        if (string.IsNullOrEmpty(reqId) || !root.TryGetObject("request", out var reqObj))
+        {
+            return;
+        }
+
+        if (reqObj.GetOptionalString("subtype") != "can_use_tool")
+        {
+            return;
+        }
+
+        var toolName = reqObj.GetStringOrDefault("tool_name", AcpRoles.Tool);
+        _pendingPermissionRequests[reqId] = toolName;
+
+        if (Config.AutoApproveTools)
+        {
+            await RespondPermissionAsync(reqId, approved: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var rawInputJson = reqObj.TryGetProperty("input", out var inp) && inp.ValueKind != JsonValueKind.Undefined
+            ? inp.GetRawText()
+            : null;
+
+        PublishEvent(new AcpPermissionRequestEvent(
+            Provider: Provider,
+            SessionId: SessionId,
+            Timestamp: now,
+            RequestId: reqId,
+            ToolName: toolName,
+            Title: $"Allow {toolName}?",
+            Description: reqObj.GetOptionalString("description"),
+            RawInputJson: rawInputJson,
+            Options: AcpPermissionOptions.DefaultAllowDeny));
     }
 }

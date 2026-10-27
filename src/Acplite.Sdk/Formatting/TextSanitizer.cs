@@ -281,4 +281,138 @@ public static class TextSanitizer
         var extracted = sb.ToString().Trim();
         return string.IsNullOrWhiteSpace(extracted) ? null : extracted;
     }
+
+    /// <summary>
+    /// Strips markdown formatting from raw thinking text, preserves paragraph boundaries as single newlines,
+    /// and retains the trailing <paramref name="maxTailChars"/> characters when the thought is long.
+    /// </summary>
+    public static string? CleanThoughtStream(string? rawThinking, int maxTailChars = 1600)
+    {
+        if (string.IsNullOrWhiteSpace(rawThinking))
+        {
+            return null;
+        }
+
+        var sb = new StringBuilder(Math.Min(rawThinking.Length, maxTailChars + 256));
+        var prevSpace = true;
+        var newlineCount = 0;
+
+        foreach (var ch in rawThinking)
+        {
+            if (ch is '*' or '`' or '_' or '#')
+            {
+                continue;
+            }
+
+            if (ch == '\n')
+            {
+                newlineCount++;
+                if (newlineCount == 2 && sb.Length > 0 && sb[^1] != '\n')
+                {
+                    if (sb[^1] == ' ')
+                    {
+                        sb[^1] = '\n';
+                    }
+                    else
+                    {
+                        sb.Append('\n');
+                    }
+                    prevSpace = true;
+                }
+                else if (!prevSpace)
+                {
+                    sb.Append(' ');
+                    prevSpace = true;
+                }
+                continue;
+            }
+
+            if (char.IsWhiteSpace(ch))
+            {
+                if (!prevSpace)
+                {
+                    sb.Append(' ');
+                    prevSpace = true;
+                }
+                continue;
+            }
+
+            newlineCount = 0;
+            sb.Append(ch);
+            prevSpace = false;
+        }
+
+        var cleaned = sb.ToString().Trim();
+        if (string.IsNullOrEmpty(cleaned))
+        {
+            return null;
+        }
+
+        if (cleaned.Length <= maxTailChars)
+        {
+            return cleaned;
+        }
+
+        var tailStart = cleaned.Length - maxTailChars;
+        var nextSpace = cleaned.IndexOfAny([' ', '\n'], tailStart);
+        if (nextSpace > tailStart && nextSpace < tailStart + 32)
+        {
+            tailStart = nextSpace + 1;
+        }
+
+        return cleaned[tailStart..].TrimStart();
+    }
+
+    /// <summary>
+    /// Segments the latest thought paragraph into word-wrapped lines of at most <paramref name="windowChars"/>
+    /// characters and returns the active (last) line segment so streaming thoughts replace the line content
+    /// with new tokens as each line fills up.
+    /// </summary>
+    public static string? FormatThoughtLineWindow(string? rawThinking, int windowChars = 110)
+    {
+        var cleaned = CleanThoughtStream(rawThinking);
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            return null;
+        }
+
+        var lastNewline = cleaned.LastIndexOf('\n');
+        var latestParagraph = lastNewline >= 0
+            ? cleaned[(lastNewline + 1)..].Trim()
+            : cleaned;
+
+        if (string.IsNullOrEmpty(latestParagraph))
+        {
+            latestParagraph = cleaned.Replace('\n', ' ').Trim();
+        }
+
+        if (latestParagraph.Length <= windowChars)
+        {
+            return latestParagraph;
+        }
+
+        var words = latestParagraph.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var currentLine = new StringBuilder(windowChars + 16);
+
+        foreach (var word in words)
+        {
+            if (currentLine.Length == 0)
+            {
+                currentLine.Append(word.Length <= windowChars ? word : word[^windowChars..]);
+                continue;
+            }
+
+            if (currentLine.Length + 1 + word.Length <= windowChars)
+            {
+                currentLine.Append(' ').Append(word);
+            }
+            else
+            {
+                currentLine.Clear();
+                currentLine.Append(word.Length <= windowChars ? word : word[^windowChars..]);
+            }
+        }
+
+        return currentLine.Length > 0 ? currentLine.ToString() : latestParagraph[^windowChars..].TrimStart();
+    }
 }

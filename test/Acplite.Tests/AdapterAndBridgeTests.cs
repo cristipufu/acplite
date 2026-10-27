@@ -592,16 +592,28 @@ public sealed class AdapterAndBridgeTests
                 hostReadFromAgent,
                 hostToAgentPipe);
 
+            using var agentReader = new StreamReader(agentReadFromHost, Encoding.UTF8);
             await using var agentWriter = new StreamWriter(agentToHostPipe, new UTF8Encoding(false)) { AutoFlush = true };
             await handle.SendPromptAsync("Continue Step 2");
+            var sentPrompt = await agentReader.ReadLineAsync(cts.Token);
+            Assert.NotNull(sentPrompt);
+
             await agentWriter.WriteLineAsync("{\"type\":\"PLANNER_RESPONSE\",\"thinking\":\"Checking Program.cs...\",\"content\":\"Integrating tunnelite acp.\"}");
-            await agentWriter.WriteLineAsync("{\"type\":\"result\",\"is_error\":false}");
+            await agentWriter.WriteLineAsync("{\"type\":\"control_request\",\"request_id\":\"agy_perm_1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"run_command\",\"input\":{\"CommandLine\":\"dotnet build\"}}}");
 
             var liveEvents = new List<AcpEvent>();
             await foreach (var ev in handle.ReadEventsAsync(cts.Token))
             {
                 liveEvents.Add(ev);
-                if (ev is AcpTurnCompletedEvent)
+                if (ev is AcpPermissionRequestEvent perm)
+                {
+                    await handle.RespondPermissionAsync(perm.RequestId, approved: true, cancellationToken: cts.Token);
+                    var permResp = await agentReader.ReadLineAsync(cts.Token);
+                    Assert.NotNull(permResp);
+                    Assert.Contains("\"behavior\":\"allow\"", permResp);
+                    await agentWriter.WriteLineAsync("{\"type\":\"result\",\"is_error\":false}");
+                }
+                else if (ev is AcpTurnCompletedEvent)
                 {
                     break;
                 }
@@ -609,6 +621,7 @@ public sealed class AdapterAndBridgeTests
 
             Assert.Contains(liveEvents, e => e is AcpThinkingDeltaEvent t && t.Delta == "Checking Program.cs...");
             Assert.Contains(liveEvents, e => e is AcpAssistantTextDeltaEvent a && a.Delta == "Integrating tunnelite acp.");
+            Assert.Contains(liveEvents, e => e is AcpPermissionRequestEvent p && p.ToolName == "run_command");
         }
         finally
         {
@@ -1056,6 +1069,17 @@ public sealed class AdapterAndBridgeTests
             Assert.True(tailedLines.Count < 20);
             Assert.StartsWith("{\"idx\":", tailedLines[0], StringComparison.Ordinal);
             Assert.Contains("\"idx\":199", tailedLines[^1], StringComparison.Ordinal);
+
+            // Verify CleanThoughtStream preserves paragraphs and FormatThoughtLineWindow returns the active wrapped window
+            var multiParagraphThought = "**First thought paragraph** about initial setup.\n\n\nSecond thought paragraph that keeps streaming tokens across the terminal width until it wraps onto a fresh line window at the end.";
+            var cleanedStream = TextSanitizer.CleanThoughtStream(multiParagraphThought);
+            Assert.NotNull(cleanedStream);
+            Assert.Contains("First thought paragraph about initial setup.\nSecond thought paragraph", cleanedStream, StringComparison.Ordinal);
+
+            var activeWindow = TextSanitizer.FormatThoughtLineWindow(multiParagraphThought, windowChars: 48);
+            Assert.NotNull(activeWindow);
+            Assert.True(activeWindow.Length <= 48);
+            Assert.Contains("fresh line window at the end.", activeWindow, StringComparison.Ordinal);
         }
         finally
         {

@@ -14,10 +14,11 @@ public static class TranscriptTailer
     public const int ChunkSize = 8192;
 
     /// <summary>
-    /// Default tail window (16 MB) when reading existing history from large multi-day <c>.jsonl</c> transcripts.
+    /// Default tail window (512 KB) when reading existing history from large multi-day <c>.jsonl</c> transcripts.
     /// Pass <see langword="null"/> to read from byte 0 regardless of file size.
     /// </summary>
-    public const long DefaultMaxInitialBytes = 16 * 1024 * 1024;
+    public const long DefaultMaxInitialBytes = 512 * 1024;
+    private static readonly TimeSpan FallbackPollInterval = TimeSpan.FromMilliseconds(120);
 
     public static async IAsyncEnumerable<string> TailLinesAsync(
         string filePath,
@@ -92,7 +93,7 @@ public static class TranscriptTailer
             while (!cancellationToken.IsCancellationRequested)
             {
                 using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                pollCts.CancelAfter(TimeSpan.FromMilliseconds(300));
+                pollCts.CancelAfter(FallbackPollInterval);
 
                 try
                 {

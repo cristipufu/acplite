@@ -32,6 +32,13 @@ internal static class AntigravityTranscriptParser
                     continue;
                 }
 
+                var headerPrefix = line.AsSpan(0, Math.Min(line.Length, 256));
+                if (!headerPrefix.Contains("\"USER_INPUT\"", StringComparison.Ordinal) &&
+                    !headerPrefix.Contains("\"PLANNER_RESPONSE\"", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 try
                 {
                     using var doc = JsonDocument.Parse(line);
@@ -85,6 +92,13 @@ internal static class AntigravityTranscriptParser
     public static IEnumerable<AcpEvent> ParseTranscriptLine(string sessionId, string line)
     {
         if (string.IsNullOrWhiteSpace(line) || line[0] != '{')
+        {
+            yield break;
+        }
+
+        var prefix = line.AsSpan(0, Math.Min(line.Length, 256));
+        if (!prefix.Contains("\"USER_INPUT\"", StringComparison.Ordinal) &&
+            !prefix.Contains("\"PLANNER_RESPONSE\"", StringComparison.Ordinal))
         {
             yield break;
         }

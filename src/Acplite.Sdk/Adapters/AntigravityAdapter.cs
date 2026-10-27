@@ -176,10 +176,10 @@ public sealed class AntigravityAdapter : ProviderAdapterBase
             args.Add("--mode");
             args.Add(config.PermissionMode!);
         }
-        else if (config.AutoApproveTools)
+
+        if (config.AutoApproveTools)
         {
-            args.Add("--mode");
-            args.Add("agent");
+            args.Add("--dangerously-skip-permissions");
         }
 
         if (config.ExtraArguments is not null)
